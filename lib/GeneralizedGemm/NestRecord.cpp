@@ -338,7 +338,42 @@ NestRecord analyzeNest(const OutlinedNest &nest, const NestAnalysisOptions &opti
   request.closedForms.scope = scope;
   request.closedForms.solver = termination.limits.solver;
   request.closedForms.referenceFill = options.referenceFill;
-  DomainResult result = analyzeDomains(program, certificate ? &*certificate : nullptr, request, backend);
+  // Section 14: invariants over the integer state at the copy's loop headers, proved by
+  // IDX-init and IDX-step. What reaches the checkers is a certificate the certificate
+  // checker accepted, which each of them checks again, and identities that are proposals.
+  // A search that proves nothing hands the given certificate on, and the record is the
+  // one it would have been.
+  const TerminationCertificate *handed = certificate ? &*certificate : nullptr;
+  IndexInvariantSearch indexSearch;
+  if (options.indexInvariants) {
+    IndexInvariantSearchOptions index;
+    index.check.scope = scope;
+    index.check.solver = termination.limits.solver;
+    index.check.referenceFill = options.referenceFill;
+    index.termination = termination.limits;
+    index.authorized = authorized;
+    indexSearch = findIndexInvariants(program, handed, nullptr, index, backend);
+    std::vector<IndexIdentity> identities;
+    handed = handIndexInvariants(program, handed, indexSearch, request, &identities);
+    NestIndexInvariants &out = r.indexInvariants;
+    out.asked = true;
+    out.status = indexSearch.status;
+    out.reason = indexSearch.reason;
+    out.automatic = !indexSearch.given;
+    out.certificateStrengthened = indexSearch.strengthened.has_value();
+    out.certificateNote = indexSearch.certificateNote;
+    out.queries = indexSearch.queries;
+    out.sampleRuns = indexSearch.samples.runs;
+    for (const CutInvariant &entry : indexSearch.certificate.cuts) {
+      auto own = indexSearch.inherited.find(entry.cut);
+      for (unsigned k = own == indexSearch.inherited.end() ? 0 : own->second; k < entry.atoms.size(); ++k)
+        out.invariants.push_back("L" + std::to_string(entry.cut) + ": " + formatLoopTerm(entry.atoms[k]));
+    }
+    for (const IndexIdentity &identity : identities)
+      out.identities.push_back("s" + std::to_string(identity.state) + " = " + formatLoopTerm(identity.term) +
+                               " at L" + std::to_string(identity.cut));
+  }
+  DomainResult result = analyzeDomains(program, handed, request, backend);
 
   const DomainEnumeration &enumeration = result.enumeration;
   r.gate = stringifyGateStatus(enumeration.gate);
@@ -970,6 +1005,27 @@ json::Object toJSON(const NestRecord &r, const std::vector<FunctionRoot> &roots)
   for (const std::string &text : r.refusals)
     refusals.push_back(text);
   out["assumptions"] = std::move(assumptions);
+  // Section 14: printed only when the search was asked for, so that no other record changes.
+  if (r.indexInvariants.asked) {
+    const NestIndexInvariants &index = r.indexInvariants;
+    json::Array invariants, identities;
+    for (const std::string &text : index.invariants)
+      invariants.push_back(text);
+    for (const std::string &text : index.identities)
+      identities.push_back(text);
+    out["index_invariants"] = json::Object{
+        {"status", index.status},
+        {"reason", index.reason},
+        {"automatic", index.automatic},
+        {"invariants", std::move(invariants)},
+        {"identities_for_the_proposer", std::move(identities)},
+        {"certificate_strengthened", index.certificateStrengthened},
+        {"certificate_note", index.certificateNote},
+        {"queries", (int64_t)index.queries},
+        {"sample_runs", (int64_t)index.sampleRuns},
+        {"role", "premises handed to the checkers as certificate invariants, which each checker checks "
+                 "again; the record's status is still read off the checkers' verdicts"}};
+  }
   out["refusals"] = std::move(refusals);
   return out;
 }

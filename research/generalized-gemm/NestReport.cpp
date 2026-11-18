@@ -48,6 +48,10 @@ static cl::opt<unsigned> candidatesPerGroup("candidates-per-group", cl::init(2))
 static cl::opt<uint64_t> replaySteps("replay-steps", cl::init(1u << 22));
 static cl::opt<uint64_t> replayNodes("replay-nodes", cl::init(1u << 23));
 static cl::opt<unsigned> maxQueries("max-queries", cl::init(4000));
+static cl::opt<bool> indexInvariants(
+    "index-invariants", cl::init(false),
+    cl::desc("search for inductive invariants over the integer state at each nest's loop headers and hand "
+             "what is proved to the analysis (a subscript carried by iter_args)"));
 static cl::opt<bool> outlineOnly(
     "outline-only", cl::init(false),
     cl::desc("print each nest's copy, or why it has none, and analyse nothing"));
@@ -78,6 +82,7 @@ int main(int argc, char **argv) {
   options.maxRounds = maxRounds;
   options.candidatesPerGroup = candidatesPerGroup;
   options.maxQueries = maxQueries;
+  options.indexInvariants = indexInvariants;
   {
     llvm::SmallVector<llvm::StringRef> items;
     llvm::StringRef(scopeText).split(items, ',', -1, /*KeepEmpty=*/false);

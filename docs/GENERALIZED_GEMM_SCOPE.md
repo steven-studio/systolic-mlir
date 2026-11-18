@@ -789,8 +789,8 @@ arrays, the alias gate and the floating-point policy.
 | --- | --- | --- |
 | its counter only, as above | VERIFIED | taken |
 | nothing (it goes on by a flag read from memory) | no claim: the trace depends on memory contents | refused: no counter |
-| a second index stepped by a constant, never read (`@second_induction`) | VERIFIED | refused: "value 1 (index) is stepped by a constant" |
-| a second index handed round unchanged, the bound (`@invariant`) | VERIFIED | refused: "value 1 (index) is carried unchanged" |
+| a second index stepped by a constant, never read (`@second_induction`) | VERIFIED | refused at `acb801a`: "value 1 (index) is stepped by a constant". Taken since the lowering reads carried indices (below, "Subscripts a loop carries") |
+| a second index handed round unchanged, the bound (`@invariant`) | VERIFIED | refused: the comparison reads two carried values; "value 1 (index) is carried unchanged" |
 | the reduction, in an f32 beside the counter (`@accumulator`) | no claim: a scalar accumulator has no exact output view | refused: "value 1 (f32) is updated by the loop: a reduction or datum held in a value, not in memory" |
 | a counter of type `i64`, cast to `index` for the accesses (`@i64`) | VERIFIED | refused: the counter is no `index` |
 | a counter whose last value is used after the loop (`@result_used`, `@inner_result_used`) | refused: no faithful copy, or a write in the frame | refused: the lowering would remove the loop that makes it |
@@ -1076,6 +1076,89 @@ research harness; the production unit binaries and the comparison of the product
 HEAD's (the tool is HEAD's); the end-to-end runs under a sanitized production tool (unchanged
 since the stage before); the research's older mutation harnesses; `systolic-cc` beyond the
 production lit suite; cosimulation and the board.
+
+### Subscripts a loop carries (built 2026-11-18 on the index-invariant line)
+
+Built on `integrate/index-invariants-into-nest-records`, which merged `acb801a` and the index
+invariants of `docs/GENERALIZED_GEMM_STATEMENT_BV.md`, Section 14; on this line since the two
+were merged (the section after this one).
+
+The lowering takes a second kind of index beside a counter: one that an `scf.for`
+(`iter_args`) or a counting `scf.while` carries, of type `index`, started at a constant,
+stepped by a constant (plus or minus), its last value unread. It reads the recurrence from
+the IR as start + step * (counter - lower bound) and treats the value as an affine form of
+the counter, in the formulas (the record's view must be that form) and in the tables (the
+nest's own addresses are evaluated with it). The record never supplies the recurrence.
+
+What decides whether such a nest is lowered is therefore the record's status, and for the
+2-D arrays that needs the research run with `--index-invariants`: without it the search
+proposes no view of a carried subscript and the record is NOT_VERIFIED. The cases, the
+refusals and the validation are in Section 14.9 of that document. A level of the record
+may be a loop's counter plus a constant (the research takes a subscript such as `k + 2`
+for the level): the lowering rewrites the record's forms to the counter and compares them
+with the nest's as before (Section 14.10). Tests: `nest_records_carried.mlir`,
+`nest_records_carried_refusals.mlir`, `nest_records_carried_tables.mlir`,
+`nest_carried_e2e.py`.
+
+Changed for the tests of the stage above: `@second_induction` is lowered; the messages of
+`@invariant` and `@accumulator` are reworded. An `affine.for` with `iter_args` is still
+refused.
+
+### The two lines together (merged 2026-11-18)
+
+Branch `integrate/index-invariants-into-generalized-gemm`: this line at `d3f3337` (the
+relations of the section before the last, and one comment of the lowering made true again)
+merged with `integrate/index-invariants-into-nest-records` at `075c047` (the section above:
+seven changes and two merges of this line's earlier states since the two parted at
+`acb801a`). An ordinary merge, since neither is an ancestor of the other; no commit is
+picked a second time. Nothing is built here. What follows is what the merge had to decide,
+and the one place where the two lines meet.
+
+**Two files changed on both sides.**
+
+- `nest_e2e.py`, the generator of the end-to-end programs. This line gave a loop
+  `step_at` (the counter of an `scf.while` stepped first); the other gave it `carry`,
+  `carry_step` and `counter_place` (indices a loop carries, stepped before or after they are
+  read; the counter as the second carried value). Both are kept: one signature, and one
+  printing of the lines that close an `scf.while`, where `step_at` places the counter's
+  increment and the other three the carried steps and what is yielded. For every spec that
+  a parent has, the merged generator prints what that parent's prints, text for text: the
+  modules, the C drivers and the announced lines of `nest_e2e.py`, `nest_driven_e2e.py`,
+  `nest_scf_e2e.py` and `nest_while_e2e.py` against `d3f3337`, and of the first three and
+  `nest_carried_e2e.py` against `075c047` (32 texts each).
+- This document: both sections are kept, this line's first.
+
+**One file both sides changed that merged by itself**, `nest_records_while_refusals.mlir`:
+this line took `@step_first` out of it (verified and lowered since the relations); the other
+lowered `@second_induction` and reworded the messages of `@invariant` and `@accumulator`.
+The merged file has both (29 functions), and its records file, made again by the merged
+research tool, is the one in the tree, byte for byte.
+
+**No production source differs from the other line's** but for the comment above
+`CountingWhile` (`d3f3337`); the research source is the other line's with
+`TerminationProposers.cpp` as it is here.
+
+**Where the two lines meet.** In one place, and it shows in the record only. The search for
+index invariants (`docs/GENERALIZED_GEMM_STATEMENT_BV.md`, Section 14.4) starts from the
+termination certificate and lists what it adds to it. Since the relations, the certificate of
+a nest with an `scf.while` already holds the equality of the body's argument and the loop's
+counter wherever it is inductive. The search no longer offers it, the record's
+`index_invariants` lists fewer invariants, and the identity that the view proposer is handed
+for such a copy is the one made for copies (Section 14.8), once, where the search's equality
+gave one for each cut. Measured on `@car_while` of `nest_records_carried.mlir`: the
+certificate has 262 conjuncts where the other line's has 256, the six more being
+`s13 == s12` at two cuts and `s15 == s14` at one, each plain and under the two variables'
+poison flags, and no conjunct of the other line's is missing at any cut; the record lists 2
+invariants where it listed 5, and the three gone are those three equalities.
+
+So two records files are made again by the merged tool: `nest_records_carried.json` (5 of
+its 13 functions: `car_while`, `car_mixed`, `car_outer`, `car_step2`, `car_shifted`) and
+`nest_records_carried_tables.json` (`car_tables_while`, of 3). They differ from the other
+line's in the `index_invariants` block of those six records and in nothing else: every
+status, level, view, closed form, tier, refusal and binding is what it was. The other
+fourteen records files, the three made without the search among them, are what the merged
+tool says, unchanged. The lowering does not read that block, and no test's expectation
+changes.
 
 ## The thesis
 

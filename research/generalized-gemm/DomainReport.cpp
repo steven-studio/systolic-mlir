@@ -6,6 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 #include "GeneralizedGemm/DomainAnalysis.h"
+#include "GeneralizedGemm/IndexInvariantSynthesis.h"
 #include "GeneralizedGemm/PolynomialAdapter.h"
 #include "GeneralizedGemm/LoopCounters.h"
 #include "GeneralizedGemm/SemanticImport.h"
@@ -23,6 +24,8 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Parser/Parser.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/FormatVariadic.h"
+#include "llvm/Support/JSON.h"
 #include "llvm/Support/raw_ostream.h"
 
 using namespace mlir;
@@ -76,6 +79,17 @@ static cl::opt<bool> noCertificate("no-certificate", cl::init(false),
                                    cl::desc("withhold the certificate, as a test"));
 static cl::opt<std::string> authorize(
     "authorize", cl::init(""), cl::desc("comma separated assumption names"));
+
+// Index invariants for a GEMM's subscripts (docs/GENERALIZED_GEMM_STATEMENT_BV.md, Section 14).
+static cl::opt<bool> indexInvariants(
+    "index-invariants", cl::init(false),
+    cl::desc("search for inductive invariants over the integer state at each loop header, hand them "
+             "to every checker as certificate invariants, and hand the proposer the identities they "
+             "give for the views"));
+static cl::opt<std::string> indexInvariant(
+    "index-invariant", cl::init(""),
+    cl::desc("cut:conjunction[;cut:conjunction...] over s<id>, sp<id>, p<id>: a certificate to check "
+             "in place of the search (a debugging comparison, reported as given)"));
 
 static std::optional<ParameterScope> parseScope(const SemanticProgram &program) {
   ParameterScope scope;
@@ -229,7 +243,34 @@ int main(int argc, char **argv) {
       }
       request.family = family;
     }
-    DomainResult result = analyzeDomains(program, certificate ? &*certificate : nullptr, request, backend);
+    // Section 14: the invariants are proved first (IDX-init, IDX-step) and conjoined into a
+    // copy of the certificate that the certificate checker must accept; that copy is what
+    // the analysis is handed, and every checker in it asks checkCertificate again. The
+    // identities are proposals for the views.
+    bool indexOn = (indexInvariants || !indexInvariant.empty()) && program.isSupported();
+    IndexInvariantSearchOptions indexOptions;
+    IndexInvariantSearch indexSearch;
+    std::vector<IndexIdentity> identities;
+    const TerminationCertificate *handed = certificate ? &*certificate : nullptr;
+    if (indexOn) {
+      indexOptions.check.scope = options.scope;
+      indexOptions.check.solver = termination.limits.solver;
+      indexOptions.check.referenceFill = referenceFill;
+      indexOptions.termination = termination.limits;
+      indexOptions.authorized = termination.authorized;
+      std::optional<IndexInvariantCertificate> given;
+      if (!indexInvariant.empty()) {
+        std::string why;
+        given = parseIndexInvariants(program, indexInvariant, why);
+        if (!given) {
+          llvm::errs() << "malformed --index-invariant " << why << "\n";
+          return 2;
+        }
+      }
+      indexSearch = findIndexInvariants(program, handed, given ? &*given : nullptr, indexOptions, backend);
+      handed = handIndexInvariants(program, handed, indexSearch, request, &identities);
+    }
+    DomainResult result = analyzeDomains(program, handed, request, backend);
     if (!first)
       llvm::outs() << ",\n";
     first = false;
@@ -243,6 +284,20 @@ int main(int argc, char **argv) {
       size_t close = text.rfind('}');
       if (close != std::string::npos)
         text = text.substr(0, close) + ",\n  \"iteration_counters\": " + counters + "\n}";
+    }
+    if (indexOn) {
+      std::string record = indexInvariantsJSON(program, indexSearch, {}, nullptr, indexOptions, identities);
+      // Rendered like the rest of the object.
+      if (auto parsed = llvm::json::parse(record)) {
+        record.clear();
+        llvm::raw_string_ostream stream(record);
+        stream << llvm::formatv("{0:2}", *parsed);
+      } else {
+        llvm::consumeError(parsed.takeError());
+      }
+      size_t close = text.rfind('}');
+      if (close != std::string::npos)
+        text = text.substr(0, close) + ",\n  \"index_invariants\": " + record + "\n}";
     }
     llvm::outs() << text;
   }

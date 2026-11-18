@@ -10,14 +10,23 @@
 // is compared here with the nest itself, read from its IR:
 //
 //   - the nest is a perfect band of loops with constant bounds and step 1, one per level of
-//     the record, in its order, with the record's bounds; the record's axes put I, J and K on
+//     the record, in its order, with the record's bounds, or with bounds that are the
+//     record's less one constant (the record's level is then the counter plus that constant,
+//     taken only with closed forms, which are rewritten to the counter before they are
+//     compared with the nest's); the record's axes put I, J and K on
 //     three of them, and its extents are their trip counts. A loop of the band is an
 //     affine.for, an scf.for (bounds and step arith.constant values, an unsigned comparison
 //     only of bounds that are not negative), or a counting scf.while: its one carried value is
 //     its counter, an index started at a constant; its before region holds one comparison,
 //     counter < constant, and hands the counter on as it is; its after region yields
-//     counter + 1; its result has no use. A for loop that carries values (iter_args), an
-//     scf.while that carries anything but its counter, and any other loop are refused;
+//     counter + 1; its result has no use. An scf.for or scf.while may besides carry index
+//     recurrences: a value of index type started at an arith.constant, handed on as itself
+//     plus or minus a constant, and not used after the loop. Such a value is read, from the IR
+//     alone, as start + step * (counter - lower) of its loop; the record's view must then be
+//     that form, as for any index, and a record that says otherwise is refused. A loop that
+//     carries anything else (a reduction held in a value, an index started or stepped by a
+//     value known at run time, one read after the loop), every carried value of an affine.for,
+//     and any other loop are refused;
 //   - the innermost body is one multiply-accumulate and pure index arithmetic: three loads,
 //     one arith.mulf of two of them, one arith.addf of the product and the third, one store of
 //     the sum to the cell the third load read; the record's element type, operations, flags
@@ -30,8 +39,8 @@
 //
 //   formulas  The record has closed forms of the views (F(I, K), G(K, J), H(I, J)), proved
 //             and affine. Each index the nest computes is read as an affine form of its loop
-//             counters (constants, the counters, addi, subi, muli by a constant, affine.apply
-//             of such) and must be the record's form, dimension by dimension, reading only the
+//             counters (constants, the counters, the index recurrences, addi, subi, muli by a
+//             constant, affine.apply of such) and must be the record's form, dimension by dimension, reading only the
 //             operand's two roles. The operands are then views of their memrefs: a subview
 //             (transposed when the roles are stored the other way) when each of two dimensions
 //             reads one role, an explicit view (one reinterpret_cast, positive element strides)

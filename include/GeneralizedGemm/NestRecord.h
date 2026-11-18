@@ -57,6 +57,26 @@ struct NestAnalysisOptions {
   unsigned candidatesPerGroup = 2, maxQueries = 4000;
   /// Over the function's arguments. Empty: no restriction, as with the domain driver.
   std::vector<NestScopeEntry> scope;
+  /// Section 14 of docs/GENERALIZED_GEMM_STATEMENT_BV.md. Search for inductive invariants
+  /// over the integer state at the loop headers of the copy (a subscript carried by
+  /// iter_args is a function of the counters only by such an invariant), and hand what
+  /// is proved to the domain analysis: the certificate with those invariants, when the
+  /// certificate checker accepts it, and the identities for the views
+  /// (handIndexInvariants). Off by default, and then a record is what it was.
+  bool indexInvariants = false;
+};
+
+/// What the search for index invariants gave a nest's analysis. Not a verdict of the
+/// record: the record still reads the checkers, which were handed the certificate.
+struct NestIndexInvariants {
+  bool asked = false;
+  std::string status, reason;          // IndexInvariantSearch's.
+  bool automatic = true;               // Found by the search; never a given one here.
+  std::vector<std::string> invariants; // "L<cut>: atom", beyond the termination certificate's.
+  std::vector<std::string> identities; // "s<v> = term at L<cut>", as handed to the proposer.
+  bool certificateStrengthened = false; // The certificate checker accepted it, and it was handed on.
+  std::string certificateNote;
+  unsigned queries = 0, sampleRuns = 0;
 };
 
 /// One level of the nest's order, outermost first: lower <= value < upper.
@@ -144,6 +164,9 @@ struct NestRecord {
   std::optional<bool> sourceFlagReassoc; // Float folds only.
 
   std::vector<std::string> assumptions, refusals;
+
+  // Section 14: only with NestAnalysisOptions::indexInvariants.
+  NestIndexInvariants indexInvariants;
 
   // Stage 2: what a reader needs to tell that the record is about the loop in front of it,
   // and under which premises its claims hold, as data rather than words.

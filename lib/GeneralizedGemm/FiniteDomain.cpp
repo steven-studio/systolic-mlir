@@ -353,6 +353,14 @@ void Enumerator::enumerate(const Ranges &ranges) {
 
 } // namespace
 
+std::optional<EntryState> referenceEntryState(const SemanticProgram &program,
+                                              const std::vector<APInt> &point, uint64_t fill,
+                                              uint64_t maxCells) {
+  if (point.size() != program.parameters.size() || hasNegativeExtent(program, point))
+    return std::nullopt;
+  return referenceEntry(program, point, fill, maxCells);
+}
+
 std::optional<EventStates> eventStates(const SemanticProgram &program,
                                        const std::vector<APInt> &point, uint64_t fill,
                                        const EnumerationLimits &limits) {

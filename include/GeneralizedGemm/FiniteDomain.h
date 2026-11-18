@@ -118,6 +118,13 @@ std::optional<EventStates> eventStates(const SemanticProgram &program,
                                        const std::vector<llvm::APInt> &point, uint64_t fill,
                                        const EnumerationLimits &limits);
 
+/// One point's entry state with every argument cell holding `fill`, as the enumerator
+/// and eventStates build it; nullopt when the point has the wrong arity, a negative
+/// extent, or more cells than `maxCells`. For code that steps a run itself.
+std::optional<EntryState> referenceEntryState(const SemanticProgram &program,
+                                              const std::vector<llvm::APInt> &point, uint64_t fill,
+                                              uint64_t maxCells);
+
 /// `certificate` may be null: then there is no enumeration.
 DomainEnumeration enumerateDomain(const SemanticProgram &program,
                                   const TerminationCertificate *certificate,

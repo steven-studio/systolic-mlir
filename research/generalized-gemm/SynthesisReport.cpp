@@ -8,6 +8,8 @@
 #include "GeneralizedGemm/LoopCounters.h"
 #include "GeneralizedGemm/SemanticImport.h"
 #include "GeneralizedGemm/ClosedFormSynthesis.h"
+#include "GeneralizedGemm/IndexInvariantSynthesis.h"
+#include "GeneralizedGemm/InvariantSynthesis.h"
 #include "GeneralizedGemm/SynthesisAnalysis.h"
 #include "GeneralizedGemm/TerminationAnalysis.h"
 #include "GeneralizedGemm/Z3Backend.h"
@@ -59,6 +61,52 @@ static cl::opt<bool> noCertificate("no-certificate", cl::init(false),
                                    cl::desc("withhold the certificate, as a test"));
 static cl::opt<std::string> authorize(
     "authorize", cl::init(""), cl::desc("comma separated assumption names"));
+// The inductive invariant path (docs/GENERALIZED_GEMM_STATEMENT_BV.md, Section 13).
+static cl::opt<bool> loopInvariants(
+    "loop-invariants", cl::init(false),
+    cl::desc("prove a function candidate for a scalar loop by an inductive invariant (INV-init, "
+             "INV-step, INV-exit), with the finite tier as the labelled fallback"));
+static cl::opt<std::string> loopFunction(
+    "loop-function", cl::init(""),
+    cl::desc("result:term[;result:term...] over p<id>: the function candidate (default: synthesized)"));
+static cl::opt<std::string> loopInvariant(
+    "loop-invariant", cl::init(""),
+    cl::desc("a certificate to check instead of a search: a conjunction (&&) over s<id>, sp<id>, p<id>"));
+static cl::opt<bool> loopInvariantScripts(
+    "loop-invariant-scripts", cl::init(false),
+    cl::desc("print every obligation's complete SMT-LIB script"));
+static cl::opt<std::string> loopDegrees(
+    "loop-invariant-degrees", cl::init(""),
+    cl::desc("d[,d...]: monomial degrees of the null-space candidates (default 1,2)"));
+static cl::opt<std::string> loopCandidates(
+    "loop-invariant-candidates", cl::init("both"),
+    cl::desc("both | nullspace | collisions: where equality candidates come from"));
+static cl::opt<std::string> loopLevels(
+    "loop-invariant-levels", cl::init(""),
+    cl::desc("degree:size[,degree:size...]: the template's levels (default 1:5,2:3,2:5)"));
+
+// Index invariants for a GEMM's subscripts (docs/GENERALIZED_GEMM_STATEMENT_BV.md, Section 14).
+static cl::opt<bool> indexInvariants(
+    "index-invariants", cl::init(false),
+    cl::desc("search for inductive invariants over the integer state at each loop header (IDX-init, "
+             "IDX-step), hand them to the coordinate checker as certificate invariants, and prove "
+             "each subscript's relation to the coordinates at its site (IDX-use)"));
+static cl::opt<std::string> indexInvariant(
+    "index-invariant", cl::init(""),
+    cl::desc("cut:conjunction[;cut:conjunction...] over s<id>, sp<id>, p<id>: a certificate to check "
+             "in place of the search (a debugging comparison, reported as given)"));
+static cl::opt<std::string> indexRelation(
+    "index-relation", cl::init(""),
+    cl::desc("site:A|B|C:dimension:term[;...]: index relations to check beside the proposed ones"));
+static cl::opt<std::string> indexDegrees(
+    "index-invariant-degrees", cl::init(""),
+    cl::desc("d[,d...]: monomial degrees of the candidates at each cut (default 1)"));
+static cl::opt<unsigned> indexSamples(
+    "index-invariant-samples", cl::init(24),
+    cl::desc("parameter points whose runs give the candidate search its states"));
+static cl::opt<bool> indexScripts(
+    "index-invariant-scripts", cl::init(false),
+    cl::desc("print every IDX obligation's complete SMT-LIB script"));
 
 static std::optional<ParameterScope> parseScope(const SemanticProgram &program) {
   ParameterScope scope;
@@ -139,17 +187,64 @@ int main(int argc, char **argv) {
       options.grammar = GrammarSpec::atLevel(fixedLevel);
     options.statementGrammar = statementGrammar;
     std::optional<TerminationCertificate> certificate;
+    std::string terminationVerdict, terminationReason;
     if (!noCertificate && program.isSupported()) {
       auto hints = polynomialRankHints(program, function, importOptions);
-      certificate = analyzeTermination(program, backend, termination, hints).certificate;
+      TerminationResult analysis = analyzeTermination(program, backend, termination, hints);
+      certificate = analysis.certificate;
+      terminationVerdict = stringifyTerminationVerdict(analysis.verdict.kind());
+      terminationReason = analysis.verdict.reason();
+    }
+    // Section 14: invariants over the integer state at the cuts, proposed by a search or
+    // given, proved by IDX-init and IDX-step, and conjoined into a copy of the
+    // certificate that the certificate checker must accept. That copy is what the
+    // search and the coordinate checker are handed below, and each asks checkCertificate
+    // about it again: an invariant that is not inductive reaches no checker.
+    bool indexOn = (indexInvariants || !indexInvariant.empty()) && program.isSupported();
+    IndexInvariantSearchOptions indexOptions;
+    IndexInvariantSearch indexSearch;
+    const TerminationCertificate *handed = certificate ? &*certificate : nullptr;
+    if (indexOn) {
+      indexOptions.check.scope = options.scope;
+      indexOptions.check.solver = termination.limits.solver;
+      indexOptions.check.scripts = indexScripts;
+      indexOptions.check.referenceFill = referenceFill;
+      indexOptions.termination = termination.limits;
+      indexOptions.authorized = termination.authorized;
+      indexOptions.samplePoints = indexSamples;
+      if (!indexDegrees.empty()) {
+        indexOptions.degrees.clear();
+        llvm::SmallVector<llvm::StringRef> items;
+        llvm::StringRef(indexDegrees).split(items, ',');
+        for (llvm::StringRef item : items) {
+          unsigned degree;
+          if (item.getAsInteger(10, degree) || !degree || degree > 3) {
+            llvm::errs() << "malformed --index-invariant-degrees\n";
+            return 2;
+          }
+          indexOptions.degrees.push_back(degree);
+        }
+      }
+      std::optional<IndexInvariantCertificate> givenInvariant;
+      if (!indexInvariant.empty()) {
+        std::string why;
+        givenInvariant = parseIndexInvariants(program, indexInvariant, why);
+        if (!givenInvariant) {
+          llvm::errs() << "malformed --index-invariant " << why << "\n";
+          return 2;
+        }
+      }
+      indexSearch = findIndexInvariants(program, handed, givenInvariant ? &*givenInvariant : nullptr,
+                                        indexOptions, backend);
+      if (indexSearch.strengthened)
+        handed = &*indexSearch.strengthened;
     }
     // Phase 4 (I1): the certificate is about the imported program; the counters are
     // ghost state it never mentions, so it stays valid, and the checkers re-check it.
     SemanticProgram original = program;
     if (iterationCounters && program.isSupported())
       addIterationCounters(program);
-    SynthesisResult result = synthesizeProgram(
-        program, certificate ? &*certificate : nullptr, options, backend);
+    SynthesisResult result = synthesizeProgram(program, handed, options, backend);
     if (!first)
       llvm::outs() << ",\n";
     first = false;
@@ -157,6 +252,24 @@ int main(int argc, char **argv) {
     std::vector<std::vector<llvm::APInt>> points;
     for (const PointEvidence &point : result.enumeration.points)
       points.push_back(point.parameters);
+    if (indexOn) {
+      std::string why;
+      auto givenRelations = parseIndexRelations(program, indexRelation, why);
+      if (!givenRelations) {
+        llvm::errs() << "malformed --index-relation " << why << "\n";
+        return 2;
+      }
+      SymbolicCheckOptions symbolic;
+      symbolic.scope = options.scope;
+      symbolic.termination = options.termination;
+      symbolic.authorized = options.authorized;
+      symbolic.limits = options.symbolic;
+      std::vector<IndexCandidateCheck> checks =
+          checkIndexCandidates(program, certificate ? &*certificate : nullptr, indexSearch, result,
+                               *givenRelations, indexOptions, symbolic, backend);
+      extras.push_back({"index_invariants",
+                        indexInvariantsJSON(program, indexSearch, checks, &result, indexOptions)});
+    }
     if (slicesFlag && program.isSupported()) {
       ClosedFormOptions closed;
       closed.scope = options.scope;
@@ -164,6 +277,83 @@ int main(int argc, char **argv) {
       closed.referenceFill = referenceFill;
       SliceSynthesisResult slices = synthesizeClosedForms(program, points, closed, backend);
       extras.push_back({"closed_forms", closedFormsJSON(program, slices)});
+    }
+    if (loopInvariants && program.isSupported()) {
+      InvariantSearchOptions search;
+      search.check.scope = options.scope;
+      search.check.solver = termination.limits.solver;
+      search.check.scripts = loopInvariantScripts;
+      if (loopCandidates != "both" && loopCandidates != "nullspace" && loopCandidates != "collisions") {
+        llvm::errs() << "malformed --loop-invariant-candidates\n";
+        return 2;
+      }
+      search.equalityCandidates = loopCandidates;
+      if (!loopDegrees.empty()) {
+        search.nullSpaceDegrees.clear();
+        llvm::SmallVector<llvm::StringRef> items;
+        llvm::StringRef(loopDegrees).split(items, ',');
+        for (llvm::StringRef item : items) {
+          unsigned degree;
+          if (item.getAsInteger(10, degree) || !degree || degree > 4) {
+            llvm::errs() << "malformed --loop-invariant-degrees\n";
+            return 2;
+          }
+          search.nullSpaceDegrees.push_back(degree);
+        }
+      }
+      if (!loopLevels.empty()) {
+        search.levels.clear();
+        llvm::SmallVector<llvm::StringRef> items;
+        llvm::StringRef(loopLevels).split(items, ',');
+        for (llvm::StringRef item : items) {
+          auto [d, z] = item.split(':');
+          unsigned degree, size;
+          if (d.getAsInteger(10, degree) || z.getAsInteger(10, size) || !degree || degree > 3 ||
+              size < 1 || size > 9) {
+            llvm::errs() << "malformed --loop-invariant-levels\n";
+            return 2;
+          }
+          search.levels.push_back({degree, size});
+        }
+      }
+      std::optional<LoopFunction> given;
+      if (!loopFunction.empty()) {
+        LoopFunction f;
+        f.origin = "given";
+        f.results.assign(program.returnSorts.size(), nullptr);
+        llvm::SmallVector<llvm::StringRef> items;
+        llvm::StringRef(loopFunction).split(items, ';', -1, /*KeepEmpty=*/false);
+        for (llvm::StringRef item : items) {
+          auto [index, text] = item.split(':');
+          unsigned j;
+          std::string why;
+          Term term = index.trim().getAsInteger(10, j) || j >= f.results.size()
+                          ? nullptr
+                          : parseLoopTerm(program, text.str(), why);
+          if (!term) {
+            llvm::errs() << "malformed --loop-function '" << item << "': " << why << "\n";
+            return 2;
+          }
+          f.results[j] = term;
+        }
+        given = f;
+      }
+      std::optional<InvariantCertificate> givenCertificate;
+      if (!loopInvariant.empty()) {
+        std::string why;
+        Term inv = parseLoopTerm(program, loopInvariant, why);
+        if (!inv) {
+          llvm::errs() << "malformed --loop-invariant: " << why << "\n";
+          return 2;
+        }
+        givenCertificate = InvariantCertificate{conjuncts(inv), "given"};
+      }
+      LoopInvariantSearch proof =
+          proveLoopFunction(program, given ? &*given : nullptr,
+                            givenCertificate ? &*givenCertificate : nullptr, search, backend);
+      extras.push_back({"loop_invariant",
+                        loopInvariantJSON(program, proof, search, terminationVerdict,
+                                          terminationReason, loopInvariantScripts)});
     }
     if (iterationCounters && program.isSupported())
       extras.push_back({"iteration_counters",

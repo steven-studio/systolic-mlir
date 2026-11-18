@@ -15,7 +15,10 @@ loop-free closed forms; phase 3 (Section 8) while candidates at the finite tier;
 (Section 11) their correctness and termination proofs for one while template, and the
 counters, identities and views that connect the closed forms to the recognition pipeline;
 phase 5 (Section 12) the arrays of Appendix G.5 in the grammar and the semantics, and the
-synthesis and proof of one table template.
+synthesis and proof of one table template. Section 13 is an inductive invariant path for
+the result of a scalar loop; Section 14 carries that path into the GEMM itself, for the
+scalar state its subscripts read, and hands what it proves to the coordinate and domain
+checkers.
 
 ## 1. What the thesis has and has not done, as it says itself
 
@@ -414,6 +417,10 @@ as before.
 
 4. Done: Section 11.
 5. Done for one template, with the rest listed as not done: Section 12.
+
+Separately from the numbered phases, Section 13 adds an inductive invariant path for
+the result of a scalar function's one loop, and Section 14 inductive invariants for the
+subscripts of a GEMM, consumed by the existing index checkers.
 
 ## 11. Phase 4: proofs for while candidates, counters as coordinates, views
 
@@ -820,3 +827,852 @@ table), the overfitted while bodies (e.g. `if 1 < v1 then (5·v1) div 3 else ...
   the header of every export says so, and nothing here is an external integration.
 - **Widths.** Everything is at the program's widths; `PROVED` for a table is for
   m < 2^w − d; the thesis's integer statements are not what is proved.
+
+## 13. The inductive invariant path for a scalar loop
+
+Before this section the architecture had no verification path for the value a scalar
+loop computes. The synthesis report refused such a function ("the program has no MAC
+site"); the slice, the loop specification and every obligation above start from a MAC
+subscript. Where the existing parts work, the record is:
+
+| Concern | Where | What it does |
+| --- | --- | --- |
+| Enumerating candidate expressions | `enumerateGrammar` (`ClosedFormSynthesis`), the `Synthesizer`, `WhileSynthesizer`, `TableSynthesizer`; `CoordinateGrammar` for coordinates | bottom-up by size, one term per value vector on the samples |
+| Enumerating inputs and states | the report's scope enumeration (`FiniteDomain`), `replayLoop`, `runConcrete`; here `loopPoints` and `sampleLoop` | concrete runs at parameter points |
+| Unrolling a loop iteration by iteration | `runConcrete` and every concrete replay; `runIndexProgram` with its fuel (`checkProgramOnTraces`, the finite tier of while candidates); `TT-init_j` unrolls d ≤ 3 steps symbolically | executed, or symbolically unrolled, per iteration |
+| Symbolic verification | `checkClosedForms` (CF, W, TT), `checkCertificate` (G2a O0–O7), the symbolic coordinate and domain tiers; here `checkLoopInvariant` | SMT-LIB text to `SmtBackend` (Z3 as a library), unsat is the only proof |
+
+The new path reuses all four and adds one checker and one search; it builds no
+separate SyGuS pipeline.
+
+### 13.1 What is proved, from what
+
+`invariantLoop` (`LoopInvariant.h`) reads the function's cut paths (`CutPaths.h`).
+Stage 1: integer parameters and results, no memory root, no float, exactly one cut.
+Paths split into entry → header (Pre), header → header (G and T, one per path),
+header → return (X and the returned values, composed with `extendSymbolicPath`), and
+entry → return without the header (a bypass). The terms are the program's own: the
+operations of each block in their order (so `x++` reads x before the update), the
+counter's update on the back edge, the guards, the no-stop conditions of every block
+passed, and a variable no path assigns is unchanged (the frame; the specification
+JSON lists it as `s' = s`).
+
+For a function candidate F (one term over the parameters per returned value) and an
+invariant Inv (a conjunction over the header variables, their poison bits and the
+parameters), `checkLoopInvariant` asks, at the program's widths and under the scope:
+
+```
+INV-init    scope ∧ Pre(s) ∧ ¬Inv(s)                     per entry path
+INV-step    scope ∧ Inv(s) ∧ G(s) ∧ T(s,s') ∧ ¬Inv(s')     per iterate path (T by substitution)
+INV-exit    scope ∧ Inv(s) ∧ X(s) ∧ ¬Post(s)               per leaving path
+RET-bypass  scope ∧ X(s) ∧ ¬Post(s)                        per bypass path
+```
+
+All unsat is `PROVED` partial correctness: a run in the scope that returns, returns F.
+X is the leaving path's condition, not ¬G: ¬G also holds where a run is stuck on a
+side condition, which returns nothing.
+
+Two devices keep the queries decidable in practice, both sound and recorded:
+
+- **Elimination.** An atom v = t (or v ± u = t, u − v = t; v a header variable not in
+  t) is a premise wherever Inv is, so the query is stated with v replaced by t. The
+  substituted query is equisatisfiable with the literal one. Applied only where Inv
+  is a premise (INV-step, INV-exit, INV-poison from the header).
+- **INV-exit-eq.** For each comparison in X, `scope ∧ Inv ∧ X ∧ a ≠ b` is asked first;
+  an unsat makes a = b a lemma, solved the same way. For the request's loop this is
+  i = N.
+
+Measured on Z3 4.8.12, before this machine's system upgrade of 2026-11-17, the literal
+exit query of the request's loop at 32 bits timed out at 60 s and the eliminated one
+took 9 ms (the scratch logs of that measurement were lost with a reboot; it is not
+re-run here). With Z3 4.13.3 the search's proof of that loop is 5 queries (13.6).
+
+### 13.2 What a model means
+
+- INV-init sat: an initial state violates Inv. The invariant candidate is wrong.
+- INV-step sat: Inv is not inductive; the model's state need not be reachable. The
+  invariant candidate fails; the function candidate is untouched.
+- INV-exit sat: the model may sit where no run goes (the invariant may be too weak).
+  It refutes F only through a run: `runConcrete` from the model's parameters must
+  return another value. When that run cannot decide (fuel, a stop, the same value),
+  the query is asked again with every parameter in [−8, 8], then [−64, 64], then one
+  parameter at a time in those ranges, and each model is run. No run that disagrees
+  → F stays `UNKNOWN`, with the model kept as `unconfirmed_exit_model`.
+- Unknown, a timeout, a resource limit: nothing. An undecided conjunction is split atom
+  by atom (each atom alone unsat proves the conjunction).
+
+### 13.3 The search and the CEGIS loop
+
+`proveLoopFunction` (`InvariantSynthesis.h`) proposes; every verdict above is the
+checker's or a run's.
+
+1. Samples: complete runs at small parameter points of the scope (`loopPoints`), the
+   header state at each arrival. They choose candidates only; no obligation reads one.
+2. A sampled run that returns another value refutes F at once (a run of the program).
+3. The template, by levels (degree, size) = (1, 5), (2, 3), (2, 5): equalities between
+   sums of monomials of degree ≤ d over the header variables and parameters (the
+   closed-form enumerator over monomial leaves, + and − and constant ×, constants 0 to 8
+   and the program's literals, `size` counting leaves and operators), offered when two
+   terms agree at every sampled state and differ at a random witness state, and only
+   when linearly independent of those already offered; comparisons ≤s <s ≤u <u between
+   two variables or a variable and 0, and the loop's own comparisons and their
+   non-strict forms; not-poison per variable. A conjunction only: no disjunction, no
+   quantifier, no division, at most 400 equalities and 200 000 terms.
+4. Houdini: check; drop the atoms a model of INV-init or INV-step falsifies (and those
+   left undecided); repeat. The result is the strongest inductive conjunction of the
+   offered atoms.
+5. INV-exit unsat: proved; the certificate is minimized (each atom dropped if the rest
+   still proves, and still excludes poison where it did) and checked once more. A
+   confirmed run: F refuted. Otherwise the next level; after the last, `UNKNOWN`, which
+   says nothing about invariants outside the template.
+   Since M1 (§13.9) the null-space levels (degree 1, then 2) run first and these
+   term-collision levels after them; `--loop-invariant-candidates` selects one source.
+6. Without a given F, the closed-form grammar over the parameters and their monomials
+   (size ≤ 5) proposes one from the sampled results; a refuting run's parameters join
+   the samples and the next F is sought (up to 4 rounds).
+
+### 13.4 Semantics, poison and termination
+
+Bit vectors at the program's widths; values wrap; nsw, nuw and exact set poison bits
+and a branch on poison is a stop (`SemanticTerm.h`, I2). Post compares bits, so
+`PROVED` says the returned bits equal F's modulo 2^w; no statement over the integers is
+made. For the C loop with `int` (nsw on every operation) the bits are proved; whether a
+returned value can be poison is the informational INV-poison query, and the claim says
+"not shown free of poison" when it is not excluded (for nsw it is not: g can overflow).
+
+An invariant proves partial correctness only. The report joins it with the G2a verdict:
+`PROVEN_TERMINATING` gives total correctness over the scope;
+`PROVEN_TERMINATING_IF_DEFINED` gives "returns F or stops on a side condition"; anything
+else leaves partial correctness only.
+
+### 13.5 Fallback and labels
+
+When nothing is proved and nothing refuted, the finite tier runs the program at the
+scope's points, every iteration executed (`checkLoopFunctionOnRuns`): `SCOPE_ENUMERATED`
+when every point of a finite scope ran and agreed (a complete bounded check of that
+scope), `SAMPLE_CONSISTENT` otherwise (tests only), `REFUTED` with the run. Only
+`PROVED_BY_INVARIANT` reports `"unrolling_omitted": true`. The proof's own queries do not
+depend on N: the same certificate checked for N ≤ 0, N ≤ 10 and N ≤ 2^31 − 1 gives the
+same obligations, and `proof.program_runs` is 0. The SMT solver's internal search is not
+claimed to be absent; only the program's loop is not unrolled.
+
+CLI: `--loop-invariants` on the synthesis report, with `--loop-function=j:term`,
+`--loop-invariant=conjunction` (check instead of search), `--loop-invariant-scripts`,
+`--loop-invariant-levels`, and since M1 `--loop-invariant-degrees=d[,d...]` and
+`--loop-invariant-candidates=both|nullspace|collisions`. Without `--loop-invariants` the
+output is unchanged.
+
+### 13.6 Results (2026-11-17, g++ 15.2, CMake 4.2.3, Z3 4.13.3)
+
+The request's loop, `for (int i = 0; i < N; i++) g += 2 * x++ + 1;`, candidate
+`p2 + (p1 + p0)·(p1 + p0) − p1·p1`, scope N ∈ [0, 2^31 − 1], i32:
+
+| | Result |
+| --- | --- |
+| request's certificate, given | INV-init, INV-step, INV-exit-eq (i = N), INV-exit unsat; 5 queries, 0 program runs |
+| search | `PROVED_BY_INVARIANT` in about 5 s: `s0 ≤u p0`, `p1 = s1 − s0`, `s2 + p1·p1 = p2 + s1·s1`, `¬sp1`, `¬sp2` (minimized from 15 atoms); proof 5 queries, 0 runs; samples 48 runs, at most 13 header arrivals each |
+| termination (G2a) | `PROVEN_TERMINATING`, so the claim is total correctness over the scope at width 32 |
+| nsw (C int) | bits proved; poison not excluded, and the claim says so |
+| wrong candidate (no −x0²) | `REFUTED` by a sampled run; with the right certificate, by INV-exit and a run from its model |
+| candidate wrong only at x0 = 1000 | no sampled run sees it; INV-exit's model, re-asked with N small, gives a run that refutes it |
+| weak certificate (no bounds on i) | inductive, INV-exit models no run reaches; not refuted, `SAMPLE_CONSISTENT` |
+
+Validation of this version: unit section `invariants` 109 checks, 0 failures (101 s,
+608 MB peak); the sections that use the shared enumerator (`index statements slices
+while counters arrays tables`) 6460 checks, 0 failures; every existing lit RUN line of
+the synthesis, computation and domain reports byte-identical to d974400 built with the
+same tools (51 of 51); lit `synth_invariants.mlir` passes; `invariant_oracle.py` (ctest
+`generalized-gemm-invariant-programs`) 28 cases, 0 problems: 17 of 17 wrong candidates
+refuted by runs the oracle replays, 4 proofs confirmed over every input and, at width 3,
+2 certificates by brute force, 2 refused certificates' violations found by brute force.
+Sanitizer (Debug, `-fsanitize=address,undefined -fno-sanitize-recover=undefined`): the
+`invariants` section 109 checks, 0 failures, no ASan or UBSan report (40 min under a
+machine load near 11, 1.9 GB peak).
+Mutation (`synthesis_mutation.py`, Debug, the `invariants` section as judge): 10 of 10
+new mutants killed by failing checks. In the first pass three of them ended in the 900 s
+command timeout under a machine load near 13; a timeout is not counted as a kill here,
+and those three were run again with `--timeout 3600` at low load, each killed by failing
+checks.
+
+### 13.7 Limits and what stays UNKNOWN
+
+- One loop, scalar integers only: memory, floats, nested or consecutive loops are
+  `UNSUPPORTED` with the reason; nothing is claimed.
+- The template is a conjunction of polynomial equalities of degree ≤ 2 and simple
+  comparisons. An invariant that needs a disjunction, a quantifier, division, a
+  bit operation, or a relation outside the levels leaves `UNKNOWN` (the INV-exit model
+  is kept). At widths 3 and 4 the oracle's catalogue has 4 right candidates of 8 left
+  unproved this way: relations that hold only modulo 8 or 16 crowd the offered
+  equalities; the same loop at 32 bits is proved (`g − g0 = i + 2·i·x0`).
+- Without a given candidate the closed-form grammar (size ≤ 5 over the parameters and
+  their monomials) proposes one; the request's own candidate is larger and is not found
+  that way, so it is given.
+- A solver unknown, a timeout or a resource limit on any obligation leaves `UNKNOWN`; an
+  INV-exit model no run confirms leaves `UNKNOWN`, never `REFUTED`.
+- Partial correctness only, unless G2a's termination verdict is joined; poison returns
+  are excluded only when INV-poison says so.
+- Not run on this version: the earlier synthesis, computation and domain mutation
+  catalogues and the other unit sections, which this change does not touch.
+
+### 13.8 M0: a fixed baseline with public benchmarks (2026-11-17)
+
+Scripts, programs and results live outside the repository, in
+`~/work/semgus-invariant-validation/coverage` (`catalogue.py`, `nla.py`,
+`m0-baseline.jsonl`, `m1.jsonl`, `m0-vs-m1.txt`, `degree3.txt`); the baseline binary is
+a8d8910 built with the same tools (`baseline-m0/`).
+
+The catalogue holds the 17 earlier loops plus 8 programs translated from SV-COMP
+`c/nla-digbench` (sosy-lab/sv-benchmarks, `master`): ps2, ps3, cohencu, mannadiv,
+prodbin, sqrt1, geo1, divbin. The translation is by hand and follows fixed rules: C `int`
+becomes i32 with wrapping operations (no nsw), each nondeterministic input becomes a
+parameter, each `assume` becomes the `--scope`, and the function returns the variable
+the benchmark's postcondition names. The SV-COMP property (a reachability assertion
+over mathematical integers) is therefore not what is checked here; what is checked is
+that the returned bits equal a formula modulo 2^32.
+
+Each loop runs three ways: A, with a formula written by hand (the formula is an input,
+not a result); B, with nothing given (the closed-form grammar proposes the formula, the
+search proposes the invariant); C, with wrong formulas. They are counted apart, and a
+proof under A is never counted as automatic synthesis:
+
+| Bucket | M0 (a8d8910) | M1 |
+| --- | --- | --- |
+| formula and invariant both found (B `PROVED_BY_INVARIANT`) | 8: step_const, step_param, step_precomputed, countdown, unsigned_guard, sum_of_i, branch_same, nla_prodbin | the same 8 |
+| formula given by hand, invariant found (A proved, B not) | 2: odd_sum, nsw_odd_sum | 3: odd_sum, nsw_odd_sum, **two_vars** |
+| neither: UNKNOWN, SAMPLE_CONSISTENT (tests only) or UNSUPPORTED | 15 | 14 |
+| wrong formulas (C) refuted by a confirmed run | 24 of 24 | 24 of 24 |
+
+### 13.9 M1: null-space equality candidates
+
+`nullSpaceEqualities` (`InvariantSynthesis.h`) reads each sampled header state as a row:
+the values of the monomials of degree ≤ d over the header variables and the parameters,
+each value read as a signed integer and multiplied exactly (`llvm::DynamicAPInt`). A
+variable that holds one constant at every sample is folded: it gets the atom `v == c`
+and leaves the matrix. Fraction-free Gauss–Jordan elimination over Q gives a basis of
+the null space, one vector per free column, scaled to coprime integers; each becomes the
+bit-vector atom `(positive part) == (negative part)` at the variables' width, with the
+free column last so that the checker's elimination can solve for it. A vector with a
+coefficient of magnitude ≥ 2^(w−1) is skipped and counted. At most 128 columns.
+
+The same samples answer differently over Z/2^w: a relation over Q read modulo 2^w still
+holds at the samples, but is only a candidate. Nothing about the null space is used as
+evidence. The atoms enter Houdini like any other, and the checker's INV-init,
+INV-step, INV-exit, RET-bypass and poison obligations are unchanged. An INV-init model
+is an initial state the samples missed: its parameters (re-asked with every parameter
+in [−64, 64] when the model's are large, so that the run does not wrap) become a new
+sampled run, the falsified atoms are excluded for good, and the level is offered again
+(at most 8 times; Sharma et al., Theorem 3). Nothing here covers every invariant modulo
+2^w: one with an even coefficient, or one that holds only because values wrap, is
+outside it.
+
+Measured (Release, Z3 4.13.3):
+
+- two_vars (`x += 2; y += x`), which neither level of the old template proved: degree 2,
+  28 columns, 254 rows, rank 20, basis 8, 2 folded; proved with 27 atoms in about 5 s.
+- Degree 3, with the formula given, against degrees 1 and 2 (`degree3.txt`): two_vars
+  4.7 s either way; cubic 0.3 s → 15 s; nla_ps3 0.2 s → 18 s; nla_cohencu 57 s, 375 MB
+  → 495 s, 2.3 GB, 56 columns, basis 34. None of the three is proved at degree 3, so
+  degree 3 is not in the default; `--loop-invariant-degrees=1,2,3` asks for it.
+- A regression the catalogue found and the unit section now checks: capping each
+  refinement run at 64 states first skipped a run altogether once the 512-state budget
+  was full, and the function CEGIS then refit without the refuting run's return
+  (unsigned_guard, mode B, ended `REFUTED` on a wrong synthesized formula). Every added
+  point is now run; only its states are capped.
+
+What stops the rest, case by case (M1):
+
+- Formula search (B: "no term of the grammar returns result 0 at every sampled run"):
+  init_param, stride3, odd_sum, nsw_odd_sum, two_vars, scaled_sum, cubic, branch_param,
+  branch_min, doubling, nla_ps3, nla_cohencu, nla_mannadiv, nla_sqrt1, nla_geo1. The
+  closed-form grammar (size ≤ 5) has no such term; M1 does not change it.
+- Invariant search, formula given (A: an INV-exit model no run confirms, so the
+  invariant found is too weak): init_param, stride3, branch_min, nla_ps3 (needs degree 3
+  and a division by 6), nla_cohencu (degree 3 offered 34 equalities and still did not
+  prove; not analyzed further), nla_mannadiv (needs a quotient and remainder relation).
+- Solver: nla_ps2, whose invariant `2·s2 = s0² + s0` is offered at degree 2, but
+  INV-step is not decided (rlimit 20M: canceled; without the limit, 120 s per query: a
+  timeout). The even coefficient means it cannot be eliminated. branch_param: INV-exit
+  canceled.
+- Formula: scaled_sum's hand-written formula is wrong modulo 2^32 and stays `REFUTED`
+  by a run.
+- Shape: nla_divbin has two loops, `UNSUPPORTED`.
+
+Validation: unit sections `invariants` and `nullspace` 144 checks, 0 failures (129 s,
+846 MB); lit `synth_invariants.mlir` passes; `invariant_oracle.py`, extended with
+two-variable loops and formula-free cases, 40 cases, 0 problems, on both a8d8910 and M1.
+ctest `generalized-gemm-invariant-programs` passes. Mutation (Debug, `--unit-only`): 4 of 4
+new mutants (constant column dropped, folded atom dropped, sign of a basis entry lost,
+INV-init models never run) killed by failing checks in the `nullspace` section, and the
+two search mutants whose code M1 touched (Houdini keeps falsified atoms, sampled runs
+refute nothing) killed again by the `invariants` section. Sanitizer (Debug,
+ASan+UBSan): `nullspace invariants` 142 checks, 0 failures, no report (80 min, 2.1 GB)
+before the regression fix; `nullspace` again after it, 35 checks, 0 failures, no
+report (33 min, 1.9 GB). Not rerun: the other unit sections and the earlier mutation
+catalogues, which this change does not touch.
+
+## 14. Index invariants for a GEMM's subscripts
+
+Section 13 proves a function of a scalar loop. This section uses the same kind of proof
+inside a GEMM: for the integer state that the subscripts of a MAC site read, at every
+loop header of the nest. It verifies how loop counters and index variables evolve, how
+candidate coordinates I, J, K relate to the subscripts as written, and (through the
+checker that already asked for it) that the address of A depends on (I, K) alone, of B on
+(K, J), of C on (I, J). It does not prove anything about the cells' values, adds no float
+reorder authorization, and leaves computation, domain, aliasing, bounds, poison and
+lowering to the checkers that own them.
+
+The checker of Section 13 (`checkLoopInvariant`) could not be used as it was: it takes a
+function with no memory root, no float and exactly one cut, and its conclusion is a
+returned value. A GEMM has three roots, a cut per loop header, and no result; what must
+be concluded is a fact at the block where a subscript is used. So the milestone adds the
+minimal counterpart, `checkIndexProof`: any number of cuts (a path that enters an inner
+loop from an outer header is one more obligation), programs with memory and floats (the
+atoms read integer state only), `scf.for` `iter_args` as the header arguments the
+structured lowering makes of them, and IDX-use in place of INV-exit. It shares the
+obligation formula (`invariantViolation`), the term text and the null-space generator
+with Section 13; `checkLoopInvariant` itself is unchanged.
+
+Files: `IndexInvariant.h/.cpp` (tier-checker library: the checker, the certificate
+strengthening, the sampler), `IndexInvariantSynthesis.h/.cpp` (synthesis library: the
+search, the relation proposer, the identities, the record), a truncation option on
+`nullSpaceEqualities` (`InvariantSynthesis`), `referenceEntryState` exported from
+`FiniteDomain`, `indexIdentities` on `DomainAnalysisRequest`. CLI, on the synthesis and
+the domain report: `--index-invariants` (search), `--index-invariant=cut:conjunction;...`
+(a given certificate: a debugging comparison); on the synthesis report also
+`--index-relation=site:A|B|C:dimension:term;...`, `--index-invariant-degrees`,
+`--index-invariant-samples`, `--index-invariant-scripts`. Without them no output changes.
+
+### 14.1 The gap, measured before the change (23cac4c)
+
+The acceptance case is a GEMM written with `scf.for` whose K subscript is a scalar
+recurrence carried by `iter_args`:
+
+```
+for i in [0, n): for j in [0, 3):
+  x = x0
+  for k in [0, kk):   C[i][j] += A[i][x] * B[x][j];   x = x + 1
+```
+
+index width 8, scope n in [1, 3], kk in [1, 4], x0 in [0, 5]. After the structured
+lowering x and k are the two arguments of the k header (state s6 and s5; x0 is p2).
+
+| Report | Before |
+| --- | --- |
+| synthesis: finite tier | `SCOPE_ENUMERATED` with I = i, J = j, K = k |
+| synthesis: symbolic tier | `PROPOSED`, `UNKNOWN`: **"V1f dependence: sat"** |
+| domain (roots authorized): access views | C proved; A and B "nothing proposed" |
+
+V1f is `checkFamilySymbolic`'s obligation that two events with equal (P, I, K) have the
+same A address. It has a model because the termination certificate's invariant at the k
+header says nothing that relates x to k, so in the over-approximated domain one k meets
+any x. The model is no counterexample: the finite tier holds at every point of the scope.
+
+Phase 4's closed forms (Section 11.4) reach this program only in the domain report and
+only through a ghost counter: with `--iteration-counters --closed-form-views` the forms
+k = c and x = c + p2 are proved and conjoined to the certificate, and the coordinate tier
+becomes `SYMBOLIC_EXACT`; no view of A or B is proposed (the identity reads the counter,
+which is no level of the family), and the route needs an innermost loop, an initial
+value over parameters alone and the instrumentation. An invariant states a relation
+between the program's own variables, at every header, with the loop's entry as one more
+path to prove.
+
+### 14.2 Where it connects
+
+**The scalar state, transitions, guards and entry conditions** come from the cut paths of
+the termination certificate's cut set (`enumerateCutPaths`), the same paths G2a's O3 and
+O4 use: a path from the entry into the outermost header, a path from each header into
+the header nested in it (what the inner loop may assume on entry), the back edges, and
+the exits back to an enclosing header. Each has the program's own condition and
+simultaneous update, with the frame. The candidates' variables are every integer state
+variable of at most 64 bits that no value read from memory reaches and that has a value
+at every sampled arrival at the cut. They are not the slice of the subscript (Section 7):
+the relation wanted is x = x0 + k, and k is not in x's slice (no assignment to x reads k,
+and the guard that reads k is on a transition that does not assign x).
+
+**The steps that need the relations** are, in `checkFamilySymbolic`: V1h, V1f and V1g (the
+two-event functional dependences), V2, V3 and the coverage simulation S1 to S3, all of
+which take their premises from the certificate's invariants at the cuts
+(`SymbolicDomain.h`); in the domain checker, the access views; and inside
+`checkCertificate` itself, O7, where a stop (a subscript outside its extent, a poison
+subscript) may become dischargeable.
+
+**How a proof is handed on.** Never as a flag. The proved atoms are conjoined to a copy
+of the termination certificate (`strengthenCertificate`), `checkCertificate` is asked
+about the copy, and only an accepted copy is handed to `synthesizeProgram` or
+`analyzeDomains`. Every checker downstream runs `checkCertificate` again on the
+certificate it is handed (`enumerateDomain`, `checkFamilySymbolic`, `checkReduction`), so
+initiation and consecution are asked again by code that links nothing of the search. An
+atom that only held on samples, or was given by hand and is not inductive, fails there:
+the unit test conjoins three such atoms into a certificate by hand, and
+`checkFamilySymbolic` answers "the certificate was not accepted".
+
+### 14.3 The obligations
+
+`checkIndexProof` (`IndexInvariant.h`). The certificate is untrusted: per cut c a
+conjunction Inv_c of atoms over the integer state, its poison bits and the parameters.
+
+```
+IDX-init  scope ∧ cond(π) ∧ ¬Inv_b(post π)                    per path entry → cut b
+IDX-step  scope ∧ Inv_a ∧ cond(π) ∧ ¬Inv_b(post π)            per path cut a → cut b
+IDX-use   scope ∧ Inv_a ∧ premise(ρ) ∧ index(end ρ) ≠ R(end ρ)  per arrival ρ at a site
+```
+
+- IDX-init and IDX-step are initiation and preservation. The cut set is checked
+  (`cutSetBreaksCycles`), every atom is adopted (`adoptProofTerm`: existing integer
+  leaves only, no memory, no float) and must be a condition. The conjunction is asked
+  first; when the solver does not decide it, one query per atom.
+- IDX-use is the conclusion where a subscript is used. ρ ranges over the arrivals at the
+  site's block from the entry or a cut (`reachSites`); its premise holds the guards and
+  the no-stop conditions up to and including the site's block, since a block that stops
+  contributes no event. R is an index relation: a term over the state at the entry of
+  the site's block and the parameters. It is asked only when IDX-init and IDX-step are
+  all unsat. With a family the record also says whether R reads state only through the
+  coordinates of the operand's axes (P, I, K for A; P, K, J for B; P, I, J for C): a
+  structural label, which is what makes the proved equality say "the address is this
+  function of those coordinates".
+- The two-event obligation is not duplicated. It is V1h, V1f, V1g of
+  `checkFamilySymbolic`: for two arrivals with their premises, each under its own copy of
+  the state and one copy of the parameters, equal keys and different addresses must be
+  unsat. That checker is the consumer, and the record prints its three results with the
+  strengthened certificate and with the certificate as it was.
+
+Every term is a bit vector at the program's widths and values wrap; `nsw`, `nuw` and
+`exact` set poison bits (I2), a poison subscript is a stop, and a stopped block has no
+event. So an equality that survives is true of the bits through any wrap, and whether a
+variable can be poison is its own atom.
+
+**What a model means.** A model of IDX-init or IDX-step refutes the invariant candidate
+and nothing else: the state of an IDX-step model need not be reachable. A model of
+IDX-use refutes the relation only when the run of the program from the model's
+parameters returns and has an event of the site whose recorded subscript differs from
+the relation's value at the entry of the event's block; otherwise the relation is
+`UNKNOWN` with the model kept as text. Neither is ever a statement that the program is
+wrong. Unknown, a timeout, a resource limit and the checker's query limit prove and
+refute nothing.
+
+**What is not claimed.** A functional dependence is not domain coverage, not unique
+coverage and not a GEMM: those remain the coverage simulation's, the domain checker's
+and Theorem 13's.
+
+### 14.4 The search, and the relations it proposes
+
+`findIndexInvariants` (`IndexInvariantSynthesis.h`) proposes; the verdicts are the
+checker's.
+
+1. Samples: complete runs at a few parameter points of the scope (`loopPoints`, 24 by
+   default) with the reference memory; at each arrival at a cut, the state
+   (`sampleCutStates`). They choose candidates only.
+2. Candidates per cut, by degree (1 by default): `v == c` for a variable constant at the
+   samples; a basis of the null space over Q of the monomials over the remaining state
+   and the parameters (M1, Section 13.9); `¬poison(v)` for a variable some transition can
+   poison. With `truncations` (on), the leaves of a narrower width also read the wider
+   state and parameters truncated to it, so that a recurrence carried at 8 bits beside a
+   16-bit counter has the candidate x8 == x0 + trunc8(k), which is true through a wrap.
+   After a level, a variable that a kept equality determines leaves the next level's
+   monomials.
+3. Houdini over all cuts at once. The termination certificate's own invariant is the
+   first atom of each cut and is never dropped (a model that falsifies it ends the search
+   as `UNKNOWN`). The atoms a model falsifies at the end of its path are dropped. An
+   IDX-init model is an initial state: its parameters become one more sampled run and the
+   candidates are derived again, without the atoms falsified at initial states (at most 8
+   times). An atom the solver does not decide is set aside.
+4. The surviving atoms are conjoined to a copy of the certificate, which
+   `checkCertificate` must accept (Section 14.2).
+
+`proposeIndexRelations`: per subscript, the term with every variable that no coordinate
+of the operand's axes reads replaced by its solution from a proved equality of the cut
+the site is reached from (an equality is solved for a variable whose coefficient is odd,
+a unit modulo 2^w), under casts as well. A proposal: IDX-use decides. `indexIdentities`
+gives the domain proposer the same solutions as `v = term`, from which it writes views
+over the levels; the domain checker proves each view under the certificate it is handed.
+
+A given certificate (`--index-invariant`) is checked with no search and no sample and
+is reported with `"automatic": false`. It is a debugging comparison and is never counted
+as found.
+
+### 14.5 Results (2026-11-18, g++ 15.2, CMake 4.2.3, Z3 4.13.3, Release)
+
+The acceptance case, searched:
+
+| | Result |
+| --- | --- |
+| invariant | `s6 == p2 + s5` (x == x0 + k) at the k header, the only atom beyond the certificate's |
+| proof | IDX-init 1, IDX-step 5, all unsat: 6 queries, 0 program runs |
+| candidate search | 24 sampled runs (1410 steps), 1 candidate offered, 1 kept, 0 refinements |
+| certificate | strengthened; accepted by `checkCertificate` (O0–O7), verdict `PROVEN_TERMINATING` where it was `PROVEN_TERMINATING_IF_DEFINED`: the subscripts' bounds follow |
+| index relations | A = (I, x0 + K), B = (x0 + K, J), C = (I, J): 6 IDX-use unsat, each over the coordinates |
+| coordinate checker | V1h, V1f, V1g unsat, `SYMBOLIC_EXACT` ("V0 to V4 and S1 to S3 discharged"); with the certificate as it was: V1f sat, `PROPOSED` |
+| domain report (roots authorized) | views A = (L0, p2 + L2), B = (p2 + L2, L1), C = (L0, L1) proved at both tiers and affine; decomposition `VERIFIED at SYMBOLIC` |
+| time | about 5 s (synthesis report), 7 s (domain report) |
+
+The same invariant given by hand gives the same proof, reported as given. With one
+sample point the search offers 12 atoms, three IDX-init models become runs, and the same
+single atom is proved.
+
+Variants, all searched (`~/work/semgus-invariant-validation/gemm-index/programs`, outside
+the repository; the unit and lit tests hold the acceptance case, `carried`, `narrow`,
+`narrow_nsw` and `bump`):
+
+| Program | Invariant found | Coordinate tier with / without |
+| --- | --- | --- |
+| x updated before the MAC | `s6 == p2 + s5`; relation A[1] = (p2 + s5) + 1 | `SYMBOLIC_EXACT` / `PROPOSED` (V1f) |
+| step 2 | `s7 == p2 + 2·s6` | `SYMBOLIC_EXACT` / `PROPOSED` |
+| x runs down | `s5 + s6 == p2`; relation p2 − s5 | `SYMBOLIC_EXACT` / `PROPOSED` |
+| two recurrences (x for A, y for B) | `s6 == p2 + s5`, `s7 == p3 + s5` | `SYMBOLIC_EXACT` / `PROPOSED` |
+| plain GEMM (no recurrence) | none (`NOTHING_FOUND`) | `SYMBOLIC_EXACT` / the same |
+| 8-bit x, 16-bit k, K up to 300 (x wraps) | `s7 == p2 + trunc8(s6)`; relation zext16(p2 + trunc8(s6)) | `SYMBOLIC_EXACT` / `PROPOSED` |
+| the same with nsw, K up to 20 | the equality and `¬poison(x)` | `SYMBOLIC_EXACT`, every run |
+| the same with nsw, K up to 300 | the equality; `¬poison(x)` offered and dropped | `SYMBOLIC_EXACT` for runs that complete |
+| strength-reduced, linearized arrays (`bump`): ra += kk per i, x = ra + k, y = j + k·m, C[rc + j] | degree 1: x == ra + k, cj == rc + j; degree 2 adds ra == kk·i, rc == m·i (outer headers), y == m·k + j | degree 1: `PROPOSED` (V1h); degrees 1, 2: `SYMBOLIC_EXACT`, relations i·kk + k, j + m·k, i·m + j proved; 5 to 7 s at index widths 8, 16 and 32 |
+
+Reverse cases:
+
+| Case | Answer |
+| --- | --- |
+| wrong invariant `x == x0 + k + 1` | `NOT_INDUCTIVE`: IDX-step has a model on the path that enters the k loop; no certificate strengthened; the coordinate tier stays at V1f |
+| `x == x0` (true on entry, not preserved) | `NOT_INDUCTIVE` on the back edge |
+| false at an initial state (`i == 1` at the outer header) | `NOT_INDUCTIVE` by IDX-init; the model's parameters are a point of the scope |
+| wrong index relation A[1] = x0 + k + 1 | `REFUTED`: a run from the model's parameters returns and its event has subscript 4 where the relation gives 5; "refutes the relation, not the program" |
+| true relation judged under no invariant | `UNKNOWN`: IDX-use has a model, the run from it returns with the relation true at every event; the model is kept as text and refutes nothing |
+| true relation that reads x itself | `PROVED`, `over_coordinates: false` |
+| missing entry condition: x carried through the j loop, `x == x0 + k` given | `NOT_INDUCTIVE` on the path from the j header into the k header; the search finds what does hold there, x == xj + k |
+| missing entry condition on a parameter: `x == k` given | `NOT_INDUCTIVE` with x0 in [0, 5]; `INDUCTIVE` with x0 = 0 |
+| overflow: `zext16(x8) == k + zext16(x0)` given | `NOT_INDUCTIVE` with K up to 300 (model at x8 = 255); `INDUCTIVE` with K and x0 up to 100 |
+| not a cut, not a condition, not a cut set, no certificate | no verdict (`UNKNOWN`), nothing handed on |
+| a solver that answers unknown, or sat with no model | never `INDUCTIVE`, never a strengthened certificate |
+| `checkCertificate` undecided on its own O4 | the search's atoms are `INDUCTIVE` and are not handed on |
+
+**No unrolling.** The proof's queries are one per path between cuts. For the 8-bit
+recurrence with K up to 4, up to 300 and up to 30000 (index width 16): 6 IDX-init and
+IDX-step queries and 6 IDX-use queries each time, 0 program runs, 5.3 to 5.9 s; the
+candidate search ran 24 sampled runs of at most 12 iterations of the k loop in all three.
+The finite tier at those scopes is a sample (`POINT`), and says so; the symbolic tier is
+about every point.
+
+**Where recognition stops** (domain report, `--index-invariants`):
+
+| Program | Reaches | Stops at |
+| --- | --- | --- |
+| acceptance case, i32 cells, roots authorized | coordinate `SYMBOLIC_EXACT`, computation, domain and Theorem 13 `SYMBOLIC`, views proved and affine, `lowering_eligible: true` | `authorizes_lowering: false`, as for every research result; the separation of the roots is an authorization, an assumption on record |
+| the same, roots not authorized | coordinate `SYMBOLIC_EXACT`, domain `SYMBOLIC`, views proved | computation: "not authorized: roots 0 and 2 are separate"; decomposition `UNKNOWN` |
+| the same with f32 cells | coordinate `SYMBOLIC_EXACT`, decomposition `VERIFIED at SYMBOLIC`, views proved | "no reorder fact (trivial, integer or float) is proved over the scope": the float reorder is `UNKNOWN`, and nothing here authorizes one |
+| x carried through the j loop | the invariant x == xj + k | coordinate tier `PROPOSED`: "no enumeration order to bound the coordinates" (the families the search finds there have x as a batch coordinate); finite tier only |
+| nsw recurrence with no scope at all | the equality; V0 to V4 discharged (`SYMBOLIC_VALID`) | coverage: "the walk to the next event is longer than the limit" |
+
+A proved index relation is a statement about subscripts. Where the table says the
+pipeline stops, the claim stops there too.
+
+### 14.6 Validation
+
+All on the final sources, Release unless said; logs in
+`~/work/semgus-invariant-validation/gemm-index/logs`, with `STATUS` naming each stage.
+
+- **Unit**: section `indexinv`, 216 checks, 0 failures (the acceptance case end to end,
+  the forged certificates, relations, given certificates, stub solvers, thin samples,
+  the sampler, `carried`, `bump`, the narrow and nsw cases). With `invariants` and
+  `nullspace`: 360 checks, 0 failures (101 s, 847 MB). The whole synthesis unit test:
+  7337 checks, 0 failures, 502 s; its CTest timeout is raised from 600 to 900 s.
+  Domain unit test `core`: 1545 checks, 0 failures (255 s).
+- **Lit**: `synth_index_invariants.mlir`, 11 RUN lines on both reports; the suite 31 of 31.
+- **Default output unchanged**: every report RUN line of the existing lit files, run
+  with the 23cac4c binaries and the new ones (same tools): 60 of 60 byte-identical; the
+  9 lines that differ use an option the baseline does not have.
+- **Independent oracle** (`index_invariant_oracle.py`, CTest
+  `generalized-gemm-index-invariant-programs`): its own interpreter of each spec at every
+  point of the scope and its own reader of the report's terms; no solver, no project
+  code. Seed 1: 23 programs (11 hand-stated, 12 random), 0 problems; seed 2: 27
+  programs, 0 problems. Over both: about 210 000 atom-at-arrival checks, 774 000
+  relation-at-event checks, 58 refutation witnesses replayed, 6560 scope points checked
+  for a symbolic tier, and 120 given invariants that are false at some arrival, none
+  called inductive. The oracle itself needed two fixes while it was written (a scope its
+  generator stated outside a narrow width, and operators printed with `nsw`); neither
+  was a defect of the reports. `invariant_oracle.py` (Section 13) passes again.
+- **Mutation** (`synthesis_mutation.py`, Debug, `--unit-only`, baseline passing first):
+  22 of 22 new mutants killed by the `indexinv` section (16 in the checker, 5 in the
+  search, 1 in the truncation leaves); the 4 null-space mutants of M1, whose function
+  this change touched, killed again by `nullspace`. The mutants were judged on the
+  sources as they stood before the `bump` checks were added; later edits only add checks
+  and a record field. The domain wiring
+  got its own test and mutants afterwards (below).
+- **Sanitizers** (Debug, ASan and UBSan, `-fno-sanitize-recover=undefined`): `indexinv`
+  216 checks, 0 failures, no report (71 s, 1.1 GB); `nullspace` 35 checks, 0 failures, no
+  report (24 min, 1.8 GB); the synthesis and domain reports on the acceptance case with
+  `--index-invariants`, no report.
+- **Domain wiring** (added after 4f607b4). `handIndexInvariants` (`DomainAnalysis.h`) is
+  the one place where the strengthened certificate and the identities are handed to the
+  domain analysis; the domain report calls it. Section `indexwiring` of the domain unit
+  test runs the acceptance case four ways and asserts each answer (35 checks, 0
+  failures, 14 s): strengthened certificate and identity, A and B views proved at both
+  tiers; strengthened certificate alone, coordinate tier `SYMBOLIC_EXACT` and no A or B
+  view proposed; identity alone with the certificate as it was, the views proposed and
+  not proved over the scope; a wrong identity (x = x0 + k + 3), proved at no tier.
+  `domain_mutation.py` (Debug, baseline passing first, a kill only by a test's own
+  assertion): 3 of 3 killed by that section, the identities not handed to the proposer,
+  the identities not gathered from the search, and the given certificate handed on in
+  place of the strengthened one. The harness gained `--tests`, to run named sections
+  only; its default is unchanged. `phase4` and the lit files `synth_index_invariants`
+  and `dom_phase4` pass again.
+- **Not run**: the other mutation catalogues and oracles (coordinate, computation,
+  domain, termination), the `holes` section of the domain unit test, and
+  `check-systolic`; this change does not touch what they exercise beyond the lines the
+  byte comparison and the domain unit test cover.
+
+### 14.7 Supported, and not
+
+Supported: programs the model supports with MAC sites; any nest for which G2a has a
+certificate (its cut set is used as it is); loop-carried integer state of any width up
+to 64 bits, including `scf.for` `iter_args` after the structured lowering; relations
+that are polynomial equalities of the stated degree over the state and parameters at a
+header, with truncations of wider leaves; not-poison atoms; given conjunctions of any
+atoms the term language holds.
+
+Not supported, by name:
+
+- **No termination certificate, no invariants.** The cuts and the consumers come from it.
+- **Candidates are equalities and not-poison atoms.** No bounds, no congruences, no
+  disjunctions are proposed; the certificate's own invariants supply the bounds that
+  were needed here. A relation that needs one the certificate lacks is not found.
+- **Samples are read over the integers.** A narrow recurrence that already wraps inside
+  the sampled runs (3 bits in the oracle's catalogue) satisfies no integer relation
+  there, and the search proposes nothing for it; the relation given by hand is proved.
+  A relation with an even coefficient on every variable has no solution for a
+  subscript, so no relation is proposed from it, though the atom itself is checked.
+- **Mixed widths only by truncation.** Zero and sign extensions are not candidate
+  leaves; a relation that reads a narrow variable as an integer is true only without a
+  wrap and needs bounds the search does not propose.
+- **Degree 2 is on request** (`--index-invariant-degrees=1,2`), and its matrices are
+  skipped above 128 monomials. It was measured on one program (`bump`).
+- **Relations are proposed from one cut's equalities** and only where the rewritten
+  subscript reads the state the coordinates read; coordinates that are not plain state
+  variables get a structural label only when the relation contains their terms whole.
+- **Sites reached without passing a cut** have the entry's premise only.
+- **The domain report prints no per-candidate relations**; it hands the identities to
+  the proposer and reports the views the domain checker proved.
+- Everything Sections 13.7 and the earlier phases list about solver answers applies: a
+  timeout or an unknown leaves `UNKNOWN`.
+
+### 14.8 In a nest's record (integration branch, 2026-11-18)
+
+On `integrate/index-invariants-into-nest-records`: this line merged with the lowering
+line's committed 771b700 (nest records, `docs/GENERALIZED_GEMM_SCOPE.md`), and nothing of
+its uncommitted scf.while work.
+
+`analyzeNest` (`NestRecord.cpp`) runs `findIndexInvariants` between the termination and
+the domain analysis when `NestAnalysisOptions::indexInvariants` is set
+(`--index-invariants` on `generalized-gemm-nest-report`; off by default), and hands the
+result on with `handIndexInvariants`. The record gains `index_invariants` (status, the
+invariants, the identities, whether the certificate checker accepted the strengthened
+certificate), printed only when asked. The record's status is still read off the checkers.
+
+The arguments of an `scf.while` body are copies of its header's. `indexIdentities` adds,
+for a state variable whose every assignment is one other variable, "copy = the source's
+solution" (or the source itself): a proposal, from which the proposer writes a view of a
+subscript that reads the body's argument. `DomainProposer.cpp` is not changed.
+
+Records, 2x3x3 f32 nests with `reassoc`, index width 16 (unit section `indexinvariants`):
+
+| Nest | Without | With `indexInvariants` |
+| --- | --- | --- |
+| x by `iter_args` from the constant 1 | `VERIFIED_NOT_MAPPED`: coordinates not verified over the scope, no closed form of A or B | `VERIFIED`, A = [I, K + 1], B = [K + 1, J], no refusal |
+| x a second carried value of an `scf.while` | `VERIFIED_NOT_MAPPED` | `VERIFIED`, the same views |
+| plain GEMM | `VERIFIED` | `VERIFIED`; nothing found, nothing handed on, same refusals and assumptions |
+| x from a function argument (scope [0, 1]) | | invariant proved; `VERIFIED_NOT_MAPPED`: "reads a parameter, and a symbolic offset is not mapped" |
+| x carried through the j loop | not mapped | not mapped |
+
+The binding (stage 2) already covers the recurrence: changing the start or the step gives
+another binding (checked in the same section), so `NestBinding` and `NestRecordGate` are
+unchanged.
+
+Validation: nest unit test 917 checks, 0 failures (231 s), of which `indexinvariants` 78
+checks; lit `nest_*` and `synth_index_invariants` 8 of 8; `indexwiring` 35 and `indexinv`
+216 checks again, 0 failures. `nest_mutation.py` (Debug, a kill only by an assertion): 4 of
+4 killed by `indexinvariants`: the search never run, the certificate handed on as it was,
+the certificate handed on without the identities, copies given no identity. The harness
+gained `--build-jobs` and `--tests`; defaults unchanged. Not run: the nest oracle, the
+nest e2e and gate harnesses (they need the production build, and the lowering is not
+changed), and the other catalogues.
+
+**A verified record is not a lowering.** The lowering (`NestRecordLowering.cpp`) refuses
+both shapes: a loop that carries values, and an `scf.while` that carries more than its
+counter. Reading a carried index as start + step * counter from the IR, and comparing
+that with the record's view, is the remaining wiring; it sits in the band reader the
+other line is changing, and waits for that. Plan and acceptance programs:
+`~/work/semgus-invariant-validation/gemm-index/integration/WIRING_PLAN.md`. That was the
+state at 3c3f49e; Section 14.9 is the wiring.
+
+### 14.9 Lowered from the record (integration branch, 2026-11-18)
+
+On `integrate/index-invariants-into-nest-records`, after the merge of the lowering line's
+committed `acb801a` (stage 3 on `scf.while`; merge `e3eb7f2`, no conflict) and nothing of
+its uncommitted work.
+
+**What the lowering reads.** `NestRecordLowering.cpp` now takes, beside a loop's counter,
+an *index recurrence*: a value an `scf.for` (`iter_args`) or a counting `scf.while` carries
+that has type `index`, starts at an `arith.constant` on every entry of the loop, is handed
+on as itself plus or minus an `arith.constant` (`arith.addi` either way round,
+`arith.subi`), and whose last value nothing after the loop reads. The lowering reads these
+four facts from the IR and writes the value as
+
+    start + step * (counter - lower bound)
+
+an affine form of the loop's counter, checked for 64-bit overflow at both ends. It is then
+an index like any other: the formulas path compares the form of each subscript with the
+record's view, and the tables path evaluates the nest's own addresses with it at every
+iteration. An `scf.while`'s counter is the carried value its comparison reads; the others
+must be forwarded in place and be recurrences.
+
+**What it does not take from the record.** Nothing of the recurrence. The record's
+`index_invariants` field is not read by the pass; the record's views are compared with
+what the IR says, as before, and the binding is checked, as before. A record with the
+right status and a view the IR does not have is refused (below).
+
+**The four statements, apart.**
+
+| | Where it is established | Carried-index GEMMs |
+| --- | --- | --- |
+| index proved | `findIndexInvariants`, Section 14.3 (research, Z3) | the invariant x == start + step * counter |
+| GEMM verified | the record's status, read off the checkers (14.8) | `VERIFIED` with affine views, or `VERIFIED_NOT_MAPPED` for flat arrays |
+| meets the lowering's conditions | `analyzeRecordDrivenNest`: binding, recurrence read from the IR, record form == IR form, alias gate, floating-point policy | the remark "lowered from its record" or the refusal with its reason |
+| lowered, linked, run, compared | `nest_carried_e2e.py` | the numbers below |
+
+**Measured** (production Release `systolic-opt`, records from
+`generalized-gemm-nest-report --index-bit-width=64`, 16x8x12 f32 nests):
+
+| Nest | Record with `--index-invariants` | Lowering | Record without | Lowering |
+| --- | --- | --- | --- | --- |
+| K subscript by `iter_args` from 2 (`car_iter`, `offset_iter`) | VERIFIED | formulas | NOT_VERIFIED (search UNKNOWN) | refused |
+| the same by a second value of an `scf.while` (`car_while`, `offset_while`) | VERIFIED | formulas | NOT_VERIFIED | refused |
+| mixed `affine.for` / `scf.while` / `scf.for`, the innermost carrying (`car_mixed`) | VERIFIED | formulas | NOT_VERIFIED | refused |
+| the outermost loop carries the row of C and A from 1 (`car_outer`) | VERIFIED | formulas | NOT_VERIFIED | refused |
+| step 2 from 1 (`car_step2`) | VERIFIED | formulas | NOT_VERIFIED | refused |
+| lower bounds 2, 1, 3 (`car_shifted`) | VERIFIED | formulas | NOT_VERIFIED | refused |
+| counting down by `arith.subi` from 13 (`down`) | VERIFIED | formulas | NOT_VERIFIED | refused |
+| `scf.while`'s second index stepped and never read (`@second_induction` of the other line's refusals) | VERIFIED (no search needed) | formulas; refused at `acb801a` | | |
+| flat arrays, carried from 2 by 1 and from 1 by 2 (`car_tables_iter`, `car_tables_while`) | VERIFIED_NOT_MAPPED | tables | NOT_VERIFIED (fold not checked) | refused |
+| flat arrays, carried from 0 by 1, the counter's twin (`car_tables_twin`) | VERIFIED_NOT_MAPPED | tables | VERIFIED_NOT_MAPPED | tables |
+| no `reassoc` (`car_strict`) | VERIFIED | refused: floating-point policy | NOT_VERIFIED | refused |
+
+**Refused, each by its own check** (`nest_records_carried_refusals.mlir`): a start or a
+step known only at run time, a value doubled each iteration, an index carried through the
+j loop, a carried reduction, an `scf.while` that forwards another value or steps by its
+counter (all NOT_VERIFIED in the record); and, with a record that is VERIFIED
+(VERIFIED_NOT_MAPPED for the second), a last value read after the loop, an index handed
+round unchanged, a carried `i64`, an `affine.for` with `iter_args`: these four are refused
+by the lowering's own reading of the IR. Eight records transplanted from a verified twin
+onto the NOT_VERIFIED functions (the twin's record under the function's name and binding)
+are refused by that reading too, each with the reason its IR gives. An edited view (K + 3
+for K + 2; step 2 for step 1) is refused by "dimension 1 of the record's view of A is not
+the nest's index: 1 * loop 2 + 2". A program whose start constant changed after the record
+was made is refused by the binding.
+
+**A limit that is older than this change, and not loosened.** When the subscript `k + 2`
+is computed in the loop body with its constant defined there, or when a carried index is
+stepped *before* it is used, the research takes the subscript itself for the K level of
+the record (from 2 to 14), and the lowering refuses: "level 2 of the record is not loop 2
+of the nest: axis, direction or bounds differ". The record is VERIFIED; the nest stays on
+the host (`car_plain`, the control of the end-to-end run; `offset_while_second`;
+`step_then_use`). That was the state at `aaa9563`; Section 14.10 takes these nests.
+
+**Validation** (2 processes at most; logs under
+`~/work/semgus-invariant-validation/gemm-index/logs/`, `low-*`):
+
+| Check | Result |
+| --- | --- |
+| Production lit, `Systolic/nest_records*` | 12 of 12: the 9 older files and `nest_records_carried.mlir`, `nest_records_carried_refusals.mlir`, `nest_records_carried_tables.mlir`. The rest of the production suite was not run |
+| End to end, carried (`nest_carried_e2e.py`, 11 functions, 10 carrying, 6 variants) | 264 function runs compared with the reference in plain C, 0 failures; 228 with every bit kept, 36 with lowered cells that differ within their bound; 12 lowered modules with their calls in program order. Records: 8 VERIFIED and 3 VERIFIED_NOT_MAPPED with index invariants; without, none of the 10 carrying nests VERIFIED, one VERIFIED_NOT_MAPPED (`car_tables_twin`) and lowered by tables |
+| End to end, the stages merged | `scf.for`: 260 runs, 0 failures; `scf.while`: 440 runs, 0 failures (as at `acb801a`) |
+| Records | the 16 record files equal what the research tool says today, byte for byte (14 in one run, the two of the tables file in a second) |
+| Research, merged tree | nest unit test 917 checks, 0 failures; domain unit test 2092 checks, 0 failures; lit 39 of 39 |
+| Gate mutation (a kill only by a test's own FileCheck) | 26 mutants run: 23 of the recurrence reader and the band around it (5 of them older ones repaired for the new code), 3 of the tables' carried indices: 26 KILLED, none by a crash or a timeout |
+
+The first run of the carried harness failed, on the harness: it expected `car_plain` to be
+lowered. The lowering's refusal (the limit above) was looked into and kept; the harness now
+expects the nest on the host.
+
+**Behaviour the other line's tests see.** `nest_records_while_refusals.mlir`:
+`@second_induction` is now lowered (it was the refusal "value 1 (index) is stepped by a
+constant"); the refusals of `@invariant` and `@accumulator` say the same thing in the new
+wording ("which carries its counter and indices stepped by a constant only"). No other
+expectation of the eleven older files changed, and their record files are byte for byte
+what the tool says.
+
+**Not done, not run.** The whole mutation catalogue (161 mutants; the ones run are
+named above); sanitizers on the new code; the nest oracle; cosimulation and the board; the
+research CTest registration `generalized-gemm-nest-carried-e2e` was added and not run
+through `ctest` (the harness was run directly). No test reaches the lowering's overflow
+check of a recurrence's form. Not built: a start or step that is a function argument
+(the invariant is proved, the record says "a symbolic offset is not mapped"), an index
+carried across two loops. Scalar invariants M2 to M4 and
+external SemGuS: not started.
+
+### 14.10 A level that is a loop's counter plus a constant (integration branch, 2026-11-18)
+
+**The limit, as it was.** A record's levels are the research's own coordinates of the
+iteration space. When every access reads the K loop through one and the same sum (`k + 2`
+by `arith.addi` in the body; a carried index stepped before it is read), the research
+takes that sum for the K level: `lower` 2, `upper` 14, views that read the level as it is
+(A = [level0, level2]). The record is VERIFIED and says the same GEMM as one with level
+from 0 to 12 and A = [level0, level2 + 2]. The lowering compared each level's bounds with
+its loop's and refused.
+
+**What the lowering does now.** For each level it takes the difference of the lower
+bounds, `shift` = the record's lower minus the loop's (0 for every record the older tests
+have). It requires the record's upper bound to be the loop's plus that shift: the same
+number of iterations, in the same direction. It then rewrites every closed form of the
+record from levels to counters (level = counter + shift, so a term c * level adds
+c * shift to the constant), and the rewritten form must be, as before, exactly the form
+the lowering read from the nest's index arithmetic. The extents, the tiles and the
+operand subviews are computed from the loops' bounds and the IR's forms, never from the
+record's.
+
+**Why this is no weaker a check.** What the record is trusted for is unchanged: its
+status and its binding. The comparison that ties its views to the IR is still an equality
+of affine forms, dimension by dimension; a shift is a change of the name of an iteration,
+fixed by the two lower bounds, and a wrong shift leaves forms that differ. Three things
+are refused that a looser reading would take:
+
+| Record | Refusal |
+| --- | --- |
+| K level of `car_plain` one further on (3 to 15), views as they were | "dimension 1 of the record's view of A is not the nest's index: 1 * loop 2 + 2" |
+| a level whose extent is not the loop's (upper 15 for a loop to 16; the older `LEVEL` tests) | "level 0 of the record is not loop 0 of the nest: axis, direction or bounds differ" |
+| a shifted level in a record with no closed forms (VERIFIED_NOT_MAPPED, by tables) | "level 2 of the record is loop 2 of the nest plus 1, and the record has no closed forms to check that against the nest's indices" |
+
+And one is taken that says the same nest otherwise: the record of `offset_iter` with its K
+level named 3 further on and its views of A and B 3 less is lowered to the same subviews
+and tiles (`RENAME`). The record's `value` field of a level (the research's term for it)
+is not read. Descending levels are refused as before.
+
+**Measured.**
+
+| Nest | Record | Before | Now |
+| --- | --- | --- | --- |
+| `car_plain`: `k + 2` by arith in the body, no carried value | VERIFIED, with index invariants or without | refused | formulas, either way |
+| `offset_while_second`: the counter is the second carried value | VERIFIED with index invariants; NOT_VERIFIED without | refused | formulas; refused without |
+| `step_then_use`: the carried index is stepped, then read | VERIFIED with index invariants; NOT_VERIFIED without (fold at POINT only) | refused | formulas; refused without |
+
+The last two moved from `nest_records_carried_refusals.mlir` to
+`nest_records_carried.mlir`. Without index invariants `car_second` and the two
+`car_step_first` programs are NOT_VERIFIED too, and stay on the host.
+
+**Validation.**
+
+2 processes at most; logs under `~/work/semgus-invariant-validation/gemm-index/logs/`,
+`lvl-*`; scripts `gemm-index/scripts/level.sh` and `level-e2e.sh`; the kept work of the
+end-to-end run in `gemm-index/integration/lowering/e2e-carried/`.
+
+| Check | Result |
+| --- | --- |
+| Production lit, `Systolic/nest_records*` | 12 of 12, the older `LEVEL`, `EXTENT` and `AXES` refusals among them, unchanged |
+| Lowered, linked, run and compared (`nest_carried_e2e.py`, 14 functions, 6 variants) | 336 function runs compared with the reference in plain C, 0 failures; 282 with every bit kept, 54 with lowered cells that differ within their bound. Four functions have a record whose K level is from 2 to 14 over a loop from 0 to 12, and each is lowered by formulas, run with 5 device invocations and compared, synchronous and asynchronous: `car_plain` (the control), `car_second` (the shape of `offset_while_second`), `car_step_first` (the shape of `step_then_use`) and `car_step_first_while`. Run on the host with no records, the same programs give the same reference |
+| End to end, the stages before (shift 0 everywhere) | stage 3: 180 runs; `scf.for`: 260; `scf.while`: 440; 0 failures each |
+| Records | the five record files remade for this change equal what the research tool says, byte for byte |
+| Gate mutation (a kill only by a test's own FileCheck) | 9 mutants of the level reading: 5 new (an extent not compared for a shifted level; a shifted level taken with no closed forms; the shift left out of the forms; the shift taken the other way; the record's lower bound taken for the loop's), 1 repaired, 3 older ones around it: 9 KILLED, none by a crash or a timeout |
+
+The generator of the end-to-end programs gained two spellings (the counter as the second
+carried value; a carried index stepped before it is read); for every spec that existed it
+prints the same module as before, compared text for text.
+
+**Not run.** The rest of the production lit suite; the rest of the mutation catalogue;
+sanitizers; the nest oracle; the research tests (no research source changed). **Not
+built.** A level that is a multiple of a counter or runs the other way; a shifted level
+for the tables path.

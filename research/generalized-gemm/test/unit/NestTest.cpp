@@ -1819,6 +1819,273 @@ func.func @skewed(%a: memref<8x8xi32>, %b: memref<8x8xi32>, %c: memref<8x8xi32>)
   CHECK(flagNames(FlagNSW | FlagNUW, false) == (std::vector<std::string>{"nsw", "nuw"}));
 }
 
+// Section 14 of docs/GENERALIZED_GEMM_STATEMENT_BV.md, in a nest's record: a subscript
+// carried round the k loop is a function of the counters only by an invariant, which
+// analyzeNest searches for when asked and hands to the checkers as a certificate.
+static const char *indexNests = R"(func.func @iter(%a: memref<4x4xf32>, %b: memref<4x4xf32>, %c: memref<4x4xf32> {llvm.noalias}) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %c3 = arith.constant 3 : index
+  scf.for %i = %c0 to %c2 step %c1 {
+    scf.for %j = %c0 to %c3 step %c1 {
+      %xf = scf.for %k = %c0 to %c3 step %c1 iter_args(%x = %c1) -> (index) {
+        %z = memref.load %c[%i, %j] : memref<4x4xf32>
+        %p = memref.load %a[%i, %x] : memref<4x4xf32>
+        %q = memref.load %b[%x, %j] : memref<4x4xf32>
+        %m = arith.mulf %p, %q : f32
+        %s = arith.addf %z, %m fastmath<reassoc> : f32
+        memref.store %s, %c[%i, %j] : memref<4x4xf32>
+        %x1 = arith.addi %x, %c1 : index
+        scf.yield %x1 : index
+      }
+    }
+  }
+  return
+}
+func.func @plain(%a: memref<4x4xf32>, %b: memref<4x4xf32>, %c: memref<4x4xf32> {llvm.noalias}) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %c3 = arith.constant 3 : index
+  scf.for %i = %c0 to %c2 step %c1 {
+    scf.for %j = %c0 to %c3 step %c1 {
+      scf.for %k = %c0 to %c3 step %c1 {
+        %z = memref.load %c[%i, %j] : memref<4x4xf32>
+        %p = memref.load %a[%i, %k] : memref<4x4xf32>
+        %q = memref.load %b[%k, %j] : memref<4x4xf32>
+        %m = arith.mulf %p, %q : f32
+        %s = arith.addf %z, %m fastmath<reassoc> : f32
+        memref.store %s, %c[%i, %j] : memref<4x4xf32>
+      }
+    }
+  }
+  return
+}
+func.func @symbolic(%a: memref<4x4xf32>, %b: memref<4x4xf32>, %c: memref<4x4xf32> {llvm.noalias}, %x0: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %c3 = arith.constant 3 : index
+  scf.for %i = %c0 to %c2 step %c1 {
+    scf.for %j = %c0 to %c3 step %c1 {
+      %xf = scf.for %k = %c0 to %c3 step %c1 iter_args(%x = %x0) -> (index) {
+        %z = memref.load %c[%i, %j] : memref<4x4xf32>
+        %p = memref.load %a[%i, %x] : memref<4x4xf32>
+        %q = memref.load %b[%x, %j] : memref<4x4xf32>
+        %m = arith.mulf %p, %q : f32
+        %s = arith.addf %z, %m fastmath<reassoc> : f32
+        memref.store %s, %c[%i, %j] : memref<4x4xf32>
+        %x1 = arith.addi %x, %c1 : index
+        scf.yield %x1 : index
+      }
+    }
+  }
+  return
+}
+func.func @carried(%a: memref<4x16xf32>, %b: memref<16x4xf32>, %c: memref<4x4xf32> {llvm.noalias}) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %c3 = arith.constant 3 : index
+  scf.for %i = %c0 to %c2 step %c1 {
+    %xo = scf.for %j = %c0 to %c3 step %c1 iter_args(%xj = %c1) -> (index) {
+      %xf = scf.for %k = %c0 to %c3 step %c1 iter_args(%x = %xj) -> (index) {
+        %z = memref.load %c[%i, %j] : memref<4x4xf32>
+        %p = memref.load %a[%i, %x] : memref<4x16xf32>
+        %q = memref.load %b[%x, %j] : memref<16x4xf32>
+        %m = arith.mulf %p, %q : f32
+        %s = arith.addf %z, %m fastmath<reassoc> : f32
+        memref.store %s, %c[%i, %j] : memref<4x4xf32>
+        %x1 = arith.addi %x, %c1 : index
+        scf.yield %x1 : index
+      }
+      scf.yield %xf : index
+    }
+  }
+  return
+}
+func.func @while(%a: memref<4x4xf32>, %b: memref<4x4xf32>, %c: memref<4x4xf32> {llvm.noalias}) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %c3 = arith.constant 3 : index
+  scf.for %i = %c0 to %c2 step %c1 {
+    scf.for %j = %c0 to %c3 step %c1 {
+      %kf, %xf = scf.while (%k = %c0, %x = %c1) : (index, index) -> (index, index) {
+        %go = arith.cmpi slt, %k, %c3 : index
+        scf.condition(%go) %k, %x : index, index
+      } do {
+      ^bb0(%kb: index, %xb: index):
+        %z = memref.load %c[%i, %j] : memref<4x4xf32>
+        %p = memref.load %a[%i, %xb] : memref<4x4xf32>
+        %q = memref.load %b[%xb, %j] : memref<4x4xf32>
+        %m = arith.mulf %p, %q : f32
+        %s = arith.addf %z, %m fastmath<reassoc> : f32
+        memref.store %s, %c[%i, %j] : memref<4x4xf32>
+        %k1 = arith.addi %kb, %c1 : index
+        %x1 = arith.addi %xb, %c1 : index
+        scf.yield %k1, %x1 : index, index
+      }
+    }
+  }
+  return
+}
+)";
+
+static void testIndexInvariants() {
+  Module m(indexNests);
+  FunctionOutline outline;
+  NestAnalysisOptions off = testOptions(), on = testOptions();
+  on.indexInvariants = true;
+  auto one = [&](const char *name, const NestAnalysisOptions &options) -> std::optional<NestRecord> {
+    std::vector<NestRecord> records = analyze(m, name, abc, outline, options);
+    CHECK(records.size() == 1);
+    if (records.size() != 1)
+      return std::nullopt;
+    return records[0];
+  };
+
+  // x carried by iter_args from the constant 1. Without the search the fold is verified
+  // and the nest is not mapped: the coordinates stop at V1f and A and B have no closed
+  // form. With it the record is VERIFIED, with A = [I, K + 1] and B = [K + 1, J].
+  {
+    auto before = one("iter", off), after = one("iter", on);
+    if (before && after) {
+      CHECK(!before->indexInvariants.asked);
+      CHECK(before->status == NestRecord::VerifiedNotMapped && before->orderedFoldVerified);
+      CHECK(says(before->refusals, "the coordinates I, J and K are not verified over the scope"));
+      CHECK(says(before->refusals, "the view of A has no proposed closed form"));
+      CHECK(says(before->refusals, "the view of B has no proposed closed form"));
+      const NestIndexInvariants &index = after->indexInvariants;
+      CHECK(index.asked && index.automatic && index.status == "INDUCTIVE");
+      CHECK(index.invariants == std::vector<std::string>{"L5: (s7 == (1 + s6))"});
+      CHECK(index.identities.size() == 1 && index.certificateStrengthened);
+      CHECK(index.certificateNote.find("accepts") != std::string::npos);
+      CHECK(after->status == NestRecord::Verified && after->refusals.empty());
+      CHECK(after->orderedFoldVerified && after->box && after->extents.has_value());
+      if (after->extents)
+        CHECK((*after->extents)[0] == 2 && (*after->extents)[1] == 3 && (*after->extents)[2] == 3);
+      // C = [I, J] plain; the K dimension of A and of B is K + 1.
+      static const char roles[3][2] = {{'I', 'J'}, {'I', 'K'}, {'K', 'J'}};
+      for (unsigned view = 0; view < 3; ++view) {
+        const NestView &v = after->views[view];
+        CHECK(v.proposed && v.affine && v.proved && v.dimensions.size() == 2);
+        if (v.dimensions.size() != 2)
+          continue;
+        for (unsigned d = 0; d < 2; ++d) {
+          const NestViewDimension &dimension = v.dimensions[d];
+          CHECK(dimension.affine && dimension.offset.has_value() && dimension.roles.size() == 1);
+          if (!dimension.offset || dimension.roles.size() != 1)
+            continue;
+          CHECK(dimension.roles[0].first == roles[view][d] && dimension.roles[0].second == 1);
+          CHECK(*dimension.offset == (roles[view][d] == 'K' ? 1 : 0));
+        }
+      }
+      // The reassociation is the source flag's, as for any binary32 fold: nothing new.
+      CHECK(after->reassociationPermitted && after->reassociationBasis == "source flag");
+      // The record says where its premises came from, and only when asked.
+      FunctionOutline again = outlineNests(m.function("iter"), abc);
+      std::string with, without;
+      {
+        llvm::raw_string_ostream a(with), b(without);
+        a << llvm::json::Value(toJSON(*after, again.roots));
+        b << llvm::json::Value(toJSON(*before, again.roots));
+      }
+      CHECK(with.find("\"index_invariants\"") != std::string::npos);
+      CHECK(with.find("\"certificate_strengthened\":true") != std::string::npos);
+      CHECK(without.find("index_invariants") == std::string::npos);
+      CHECK(with.find("\"authorizes_lowering\":true") == std::string::npos);
+    }
+  }
+  // The binding already covers the recurrence: the carried value's start and step are
+  // operations and constants of the loop, so a record made for x from 1 by 1 is about
+  // another loop than x from 2, or x by 2 (stage 2's binding; nothing added for it).
+  {
+    std::string base = indexNests;
+    auto bindingOf = [&](const std::string &text) -> std::string {
+      Module changed(text);
+      FunctionOutline o = outlineNests(changed.function("iter"), abc);
+      CHECK(o.nests.size() == 1);
+      return o.nests.size() == 1 ? o.nests[0].bindingSha : std::string();
+    };
+    auto replaced = [&](const std::string &from, const std::string &to) {
+      std::string text = base;
+      size_t at = text.find(from);
+      CHECK(at != std::string::npos);
+      if (at != std::string::npos)
+        text.replace(at, from.size(), to);
+      return text;
+    };
+    std::string original = bindingOf(base);
+    std::string start = bindingOf(replaced("iter_args(%x = %c1)", "iter_args(%x = %c2)"));
+    std::string step = bindingOf(replaced("%x1 = arith.addi %x, %c1 : index", "%x1 = arith.addi %x, %c2 : index"));
+    CHECK(!original.empty() && !start.empty() && !step.empty());
+    CHECK(original != start && original != step && start != step);
+    CHECK(original == bindingOf(base));
+  }
+  // A plain GEMM: nothing to find, nothing handed on, and the same record.
+  {
+    auto before = one("plain", off), after = one("plain", on);
+    if (before && after) {
+      CHECK(after->indexInvariants.asked && after->indexInvariants.status == "NOTHING_FOUND");
+      CHECK(!after->indexInvariants.certificateStrengthened && after->indexInvariants.identities.empty());
+      CHECK(before->status == NestRecord::Verified && after->status == NestRecord::Verified);
+      CHECK(plainViews(*before) && plainViews(*after));
+      CHECK(before->refusals == after->refusals && before->assumptions == after->assumptions);
+    }
+  }
+  // Refusals that the invariant must not lift.
+  // x starts at an argument: the invariant x == x0 + k is proved and the views with it,
+  // and a symbolic offset is still not mapped.
+  {
+    NestAnalysisOptions scoped = on;
+    scoped.scope.push_back({3, 0, 1});
+    auto after = one("symbolic", scoped);
+    if (after) {
+      CHECK(after->indexInvariants.status == "INDUCTIVE" && after->indexInvariants.certificateStrengthened);
+      CHECK(after->orderedFoldVerified);
+      CHECK(after->status == NestRecord::VerifiedNotMapped);
+      CHECK(says(after->refusals, "reads a parameter, and a symbolic offset is not mapped"));
+    }
+  }
+  // x is not reset when the k loop is entered: A's address is no function of (I, K), and
+  // no invariant makes it one. Not mapped, with or without the search.
+  {
+    auto before = one("carried", off), after = one("carried", on);
+    if (before && after) {
+      CHECK(before->status != NestRecord::Verified && after->status != NestRecord::Verified);
+      CHECK(!after->refusals.empty());
+    }
+  }
+  // x as a second carried value of an scf.while. The subscript reads the body's argument,
+  // which is a copy of the header's x; the copy is handed to the proposer with x's
+  // solution (and the body's counter as a copy of the header's), so A and B get the same
+  // views as with iter_args and the record is VERIFIED.
+  {
+    auto before = one("while", off), after = one("while", on);
+    if (before && after) {
+      CHECK(before->status == NestRecord::VerifiedNotMapped);
+      CHECK(says(before->refusals, "the coordinates I, J and K are not verified over the scope"));
+      CHECK(after->indexInvariants.status == "INDUCTIVE" && after->indexInvariants.certificateStrengthened);
+      CHECK(after->indexInvariants.invariants.size() == 1 && after->indexInvariants.identities.size() == 3);
+      CHECK(after->status == NestRecord::Verified && after->refusals.empty());
+      for (unsigned view : {1u, 2u}) {
+        const NestView &v = after->views[view];
+        CHECK(v.proposed && v.affine && v.proved && v.dimensions.size() == 2);
+        // The K dimension is the second of A and the first of B.
+        unsigned d = view == 1 ? 1 : 0;
+        if (v.dimensions.size() == 2 && v.dimensions[d].offset && v.dimensions[d].roles.size() == 1) {
+          CHECK(*v.dimensions[d].offset == 1);
+          CHECK(v.dimensions[d].roles[0].first == 'K' && v.dimensions[d].roles[0].second == 1);
+        } else {
+          CHECK(false && "the K dimension has no offset over one role");
+        }
+      }
+    }
+  }
+}
+
 int main(int argc, char **argv) {
   setvbuf(stdout, nullptr, _IOLBF, 0);
   mlir::MLIRContext local;
@@ -1841,6 +2108,7 @@ int main(int argc, char **argv) {
   run("nests", testNests);
   run("refusals", testRefusals);
   run("effects", testEffects);
+  run("indexinvariants", testIndexInvariants);
   printf("%d checks, %d failures\n", checks, failures);
   return failures ? 1 : 0;
 }

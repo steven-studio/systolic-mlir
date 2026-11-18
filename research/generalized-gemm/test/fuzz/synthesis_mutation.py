@@ -27,6 +27,10 @@ I = "IndexProgram.cpp"       # Statement-level index programs (thesis App. G, bi
 L = "IndexSlice.cpp"         # Their specification and obligations.
 Z = "ClosedFormSynthesis.cpp"
 N = "LoopCounters.cpp"
+P = "LoopInvariant.cpp"       # The inductive invariant path: the checker (Section 13).
+Q = "InvariantSynthesis.cpp"  # Its search.
+R = "IndexInvariant.cpp"           # Index invariants for a GEMM's subscripts: the checker (Section 14).
+U = "IndexInvariantSynthesis.cpp"  # Their search, and the relations it proposes.
 MUTANTS = [
     # Definedness and evaluation.
     ("division ignored", F, "case TermOp::UDiv: case TermOp::URem: case TermOp::SDiv: case TermOp::SRem: {", "case TermOp::SDiv: case TermOp::SRem: {"),
@@ -169,6 +173,45 @@ MUTANTS = [
     ("counter never takes over a kernel", G, "isCounter(atom.term) && !isCounter(out.atoms[slot->second].term)", "false && isCounter(atom.term) && !isCounter(out.atoms[slot->second].term)"),
     ("counter bumped on every edge", N, "        t.assignments.push_back({var.id, inLoop[t.from] ? bumped : zero});", "        t.assignments.push_back({var.id, bumped});"),
     ("replay ignores the counter", N, '      if (!value || *value != APInt(width, expected[c.header], /*isSigned=*/false, /*implicitTrunc=*/true)) {', "      if (false) {"),
+    # The inductive invariant path (Section 13). Killed by the `invariants` section.
+    ("INV-init skipped", P, "  bool init = induction(/*step=*/false);", "  bool init = true;"),
+    ("INV-step skipped", P, "  bool step = (init || !options.failFast) ? induction(/*step=*/true) : false;", "  bool step = init;"),
+    ("a failed INV-exit leaves the proof standing", P, "    provedAll = false;\n    if (response.answer == SmtAnswer::Unknown) {", "    if (response.answer == SmtAnswer::Unknown) {"),
+    ("exit lemma used unproved", P, "      out.records[index].evidence = \"lemma \" + lemma;\n      if (response.answer != SmtAnswer::Unsat)\n        continue;", "      out.records[index].evidence = \"lemma \" + lemma;"),
+    ("exit model refutes without a run", P, "  if (!differs) {\n    note = \"the run from \"", "  if (false) {\n    note = \"the run from \""),
+    ("solved form with the wrong sign", P, "        Term rhs = here->op == TermOp::Add ? terms.binary(TermOp::Sub, other, b)\n                                           : terms.binary(TermOp::Add, other, b);", "        Term rhs = here->op == TermOp::Add ? terms.binary(TermOp::Add, other, b)\n                                           : terms.binary(TermOp::Sub, other, b);"),
+    ("bypass paths unchecked", P, "  bypasses();\n  if (out.invariant", "  if (out.invariant"),
+    ("poison excluded without a query", P, "    if (response.answer != SmtAnswer::Unsat) {\n      excluded = false;", "    if (false) {\n      excluded = false;"),
+    ("Houdini keeps falsified atoms", Q, "        if (!drop.count(k))\n          kept.push_back(atoms[k]);", "        kept.push_back(atoms[k]);"),
+    ("sampled runs refute nothing", Q, "      if (refuteOnSamples(out.function)) {", "      if (false) {"),
+    # M1: null-space candidates. Killed by the `nullspace` section.
+    ("null space without the constant column", Q, "    std::vector<std::vector<size_t>> monomials{{}};", "    std::vector<std::vector<size_t>> monomials;"),
+    ("folded variables lose their atom", Q, "    atoms.push_back(terms.icmp(Predicate::Eq, terms.state(v, program.state[v].sort),\n                               terms.bv(rows.front()[i])));", "    (void)v;"),
+    ("null-space sign lost", Q, "          add(negative, scaled(k, -x[k]));", "          add(positive, scaled(k, -x[k]));"),
+    ("INV-init models never become runs", Q, '      if (nullSpace && result.falsifiedBy == "INV-init" && !result.initialParameters.empty() &&', '      if (false && result.falsifiedBy == "INV-init" && !result.initialParameters.empty() &&'),
+    # Section 14: index invariants. Killed by the `indexinv` section.
+    ("IDX-init skipped", R, "    if (path.to == program.exitLocation())\n      continue;\n    auto target = atoms.find(path.to);", "    if (path.to == program.exitLocation() || path.fromEntry)\n      continue;\n    auto target = atoms.find(path.to);"),
+    ("IDX-step skipped", R, "    if (path.to == program.exitLocation())\n      continue;\n    auto target = atoms.find(path.to);", "    if (path.to == program.exitLocation() || !path.fromEntry)\n      continue;\n    auto target = atoms.find(path.to);"),
+    ("IDX-step without the source invariant", R, "    Term source = path.fromEntry ? terms.boolean(true) : invariantAt(path.from);\n    Term formula = invariantViolation(program, scope, path, source, conjunction(list));", "    Term source = terms.boolean(true);\n    Term formula = invariantViolation(program, scope, path, source, conjunction(list));"),
+    ("IDX induction: a model discharges", R, "    if (asked && response.answer == SmtAnswer::Unsat)\n      continue;\n    if (asked && response.answer == SmtAnswer::Sat) {", "    if (asked && response.answer != SmtAnswer::Unknown)\n      continue;\n    if (asked && response.answer == SmtAnswer::Sat) {"),
+    ("IDX induction: undecided atoms count as proved", R, "      } else if (!ran || alone.answer == SmtAnswer::Unknown) {\n        undecided.push_back(k);\n      }", "      }"),
+    ("IDX induction: a failed path does not fail", R, "  failed = true;\n  out.invariantReason =", "  out.invariantReason ="),
+    ("IDX atom need not be a condition", R, "      if (adopted->sort != Sort::bv(1)) {\n        out.invariantReason = where + \" is not a condition\";", "      if (false) {\n        out.invariantReason = where + \" is not a condition\";"),
+    ("IDX cut set unchecked", R, "  if (!cutSetBreaksCycles(program, cuts, why)) {", "  if (false) {"),
+    ("IDX-use under a certificate with a model", R, "  if (failed) {\n    out.invariant = IndexInvariantVerdict::NotInductive;\n    return std::move(out);", "  if (failed) {\n    out.invariant = IndexInvariantVerdict::NotInductive;\n    uses();\n    return std::move(out);"),
+    ("IDX-use ignores the invariants", R, "reachSites(program, out.invariants, cuts, sites, scope, options.paths);", "reachSites(program, {}, cuts, sites, scope, options.paths);"),
+    ("IDX-use: a model discharges", R, "      if (asked && response.answer == SmtAnswer::Unsat)\n        continue;\n      every = false;", "      if (asked && response.answer != SmtAnswer::Unknown)\n        continue;\n      every = false;"),
+    ("IDX-use: an unconfirmed model refutes", R, "      if (confirm(response, claim, adopted[r], checked, note)) {", "      if (confirm(response, claim, adopted[r], checked, note) || true) {"),
+    ("IDX-use: the witness is not compared", R, "    if (*value == index[claim.dimension])\n      continue;\n", ""),
+    ("IDX relation of another width accepted", R, "    if (term->sort != index->sort) {", "    if (false) {"),
+    ("over_coordinates always true", R, "  return through(relation);", "  return true;"),
+    ("strengthening drops the certificate's invariant", R, "        invariant = terms.logicalAnd(invariant, extra);\n        placed = true;", "        invariant = extra;\n        placed = true;"),
+    ("index Houdini keeps falsified atoms", U, "    list.erase(std::remove_if(list.begin(), list.end(), [&](Term atom) { return gone.count(atom); }),\n               list.end());", "    (void)list;"),
+    ("index IDX-init models never become runs", U, "    if (initial && !out.check.initialParameters.empty() &&", "    if (false && !out.check.initialParameters.empty() &&"),
+    ("the certificate checker's refusal is ignored", U, "  if (accepted) {\n    out.strengthened = std::move(copy);", "  if (true) {\n    out.strengthened = std::move(copy);"),
+    ("the certificate's own invariant is not judged", U, "    if (own != inheritedAtom.end())\n      entry.atoms.push_back(own->second);\n", ""),
+    ("index relation solved with the wrong sign", U, "  APInt scale = -linear->second.multiplicativeInverse();", "  APInt scale = linear->second.multiplicativeInverse();"),
+    ("no truncated leaves", Q, "  if (truncations) {", "  if (false) {"),
 ]
 
 # Changes that no test can see, and why. Not run: a survivor here would mean nothing.
@@ -218,13 +261,17 @@ class Worker:
                 shutil.copy(f, copy)
 
     def compile(self):
-        return run(["ninja", "-C", self.build, "-j3", "generalized-gemm-synthesis-test",
+        return run(["ninja", "-C", self.build, f"-j{self.args.build_jobs}", "generalized-gemm-synthesis-test",
                     "generalized-gemm-synthesis-report"])
 
     def commands(self):
         fuzz = self.root / "research" / "generalized-gemm" / "test" / "fuzz"
+        unit = [self.build / "generalized-gemm-synthesis-test"] + \
+            [n for n in self.args.unit_sections.split(",") if n]
+        if self.args.unit_only:
+            return [("unit", unit)]
         return [
-            ("unit", [self.build / "generalized-gemm-synthesis-test"]),
+            ("unit", unit),
             ("programs", [sys.executable, fuzz / "synthesis_oracle.py", "--driver",
                           self.build / "generalized-gemm-synthesis-report",
                           "--programs", "6", "--seed", "41", "--jobs", "3"]),
@@ -242,7 +289,7 @@ class Worker:
             return f"NO-BUILD {name}\n{built.stdout[-600:]}", False
         for label, command in self.commands():
             try:
-                if run(command).returncode:
+                if run(command, timeout=self.args.timeout).returncode:
                     return f"KILLED by {label}: {name}", True
             except subprocess.TimeoutExpired:
                 return f"KILLED by timeout in {label}: {name}", True
@@ -257,6 +304,11 @@ def main():
     parser.add_argument("--mlir-dir", required=True)
     parser.add_argument("--only", default="", help="comma-separated mutant names")
     parser.add_argument("--workers", type=int, default=3)
+    # Defaults keep the harness as it was: every unit section, the program oracle, 3 jobs.
+    parser.add_argument("--build-jobs", type=int, default=3)
+    parser.add_argument("--unit-sections", default="", help="comma-separated unit test sections")
+    parser.add_argument("--unit-only", action="store_true", help="skip the program oracle")
+    parser.add_argument("--timeout", type=int, default=900, help="seconds per test command")
     args = parser.parse_args()
 
     names = [n for n in args.only.split(",") if n]
@@ -294,7 +346,7 @@ def main():
         print(f"BASELINE NO-BUILD\n{built.stdout[-1500:]}")
         return 2
     for label, command in first.commands():
-        result = run(command)
+        result = run(command, timeout=args.timeout)
         if result.returncode:
             print(f"BASELINE FAILED: {label}\n{result.stdout[-1500:]}\n{result.stderr[-1500:]}")
             return 2

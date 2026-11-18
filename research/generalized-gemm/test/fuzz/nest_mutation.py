@@ -35,6 +35,7 @@ import signal
 import subprocess
 import sys
 
+X = "IndexInvariantSynthesis.cpp"  # Section 14: the identities a nest's analysis hands on.
 O = "NestOutline.cpp"
 N = "NestRecord.cpp"
 
@@ -170,6 +171,12 @@ MUTANTS += [
     ("the binding of the next nest", O,
      "            mlir::systolic::computeNestBinding(function, loop, entry.nest, shared, why);\n",
      "            mlir::systolic::computeNestBinding(function, loop, entry.nest + 1, shared, why);\n"),
+    # Section 14 of the statement record: index invariants in a nest's analysis. Killed by
+    # the unit section `indexinvariants`.
+    ("index invariants never searched for", N, "  if (options.indexInvariants) {\n    IndexInvariantSearchOptions index;", "  if (false) {\n    IndexInvariantSearchOptions index;"),
+    ("the nest's analysis handed the certificate as it was", N, "  DomainResult result = analyzeDomains(program, handed, request, backend);", "  DomainResult result = analyzeDomains(program, certificate ? &*certificate : nullptr, request, backend);"),
+    ("copies of solved variables get no identity", X, "    if (several.count(id) || solved.count(id) || term->op != TermOp::State || term->index == id ||", "    if (true || several.count(id) || solved.count(id) || term->op != TermOp::State || term->index == id ||"),
+    ("the nest's analysis handed the certificate without the identities", N, "    handed = handIndexInvariants(program, handed, indexSearch, request, &identities);", "    if (indexSearch.strengthened)\n      handed = &*indexSearch.strengthened;"),
 ]
 
 EQUIVALENT = [
@@ -272,6 +279,9 @@ def main():
     parser.add_argument("--only", default="", help="mutant names, semicolon-separated")
     parser.add_argument("--oracle-programs", type=int, default=10)
     parser.add_argument("--jobs", type=int, default=4, help="driver runs at a time inside the oracle")
+    # Defaults keep the harness as it was: four build jobs, every test.
+    parser.add_argument("--build-jobs", type=int, default=4)
+    parser.add_argument("--tests", default="", help="run only the tests with these labels, semicolon-separated")
     args = parser.parse_args()
     root = Path(args.source).resolve()
     scratch = Path(args.scratch).resolve()
@@ -322,7 +332,7 @@ def main():
     targets = ["generalized-gemm-nest-test", "generalized-gemm-nest-report", "generalized-gemm-domain-report"]
 
     def compile_all():
-        return run(["ninja", "-C", build, "-j4"] + targets, timeout=BUILD_SECONDS, memory=0)
+        return run(["ninja", "-C", build, f"-j{args.build_jobs}"] + targets, timeout=BUILD_SECONDS, memory=0)
 
     unit = build / "generalized-gemm-nest-test"
     oracle = root / "research" / "generalized-gemm" / "test" / "fuzz" / "nest_oracle.py"
@@ -335,11 +345,19 @@ def main():
              ("unit effects", "unit", [unit, "effects"]),
              ("unit refusals", "unit", [unit, "refusals"]),
              ("unit nests", "unit", [unit, "nests"]),
+             ("unit indexinvariants", "unit", [unit, "indexinvariants"]),
              ("lit nest records", "lit", [args.lit, "-v", build / "lit", "--filter",
                                           "nest_(product|shared|stored|reads|refusals)"]),
              ("oracle", "oracle", [sys.executable, oracle, "--driver", build / "generalized-gemm-nest-report",
                                    "--domain-driver", build / "generalized-gemm-domain-report", "--programs",
                                    str(args.oracle_programs), "--jobs", str(args.jobs), "--no-minimum"])]
+
+    wanted = [label.strip() for label in args.tests.split(";") if label.strip()]
+    for label in wanted:
+        if label not in [t[0] for t in tests]:
+            sys.exit(f"no test labelled '{label}'")
+    if wanted:
+        tests = [t for t in tests if t[0] in wanted]
 
     def run_tests():
         """The first assertion that fails, or what else went wrong, or nothing."""
