@@ -10,7 +10,10 @@
 // is compared here with the nest itself, read from its IR:
 //
 //   - the nest is a perfect band of loops with constant bounds and step 1, one per level of
-//     the record, in its order, with the record's bounds; the record's axes put I, J and K on
+//     the record, in its order, with the record's bounds, or with bounds that are the
+//     record's less one constant (the record's level is then the counter plus that constant,
+//     taken only with closed forms, which are rewritten to the counter before they are
+//     compared with the nest's); the record's axes put I, J and K on
 //     three of them, and its extents are their trip counts. A loop of the band is an
 //     affine.for, an scf.for (bounds and step arith.constant values, an unsigned comparison
 //     only of bounds that are not negative), or a counting scf.while: its one carried value is

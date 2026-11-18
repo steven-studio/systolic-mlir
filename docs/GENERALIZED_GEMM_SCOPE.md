@@ -943,8 +943,10 @@ nest's own addresses are evaluated with it). The record never supplies the recur
 What decides whether such a nest is lowered is therefore the record's status, and for the
 2-D arrays that needs the research run with `--index-invariants`: without it the search
 proposes no view of a carried subscript and the record is NOT_VERIFIED. The cases, the
-refusals, the limit on a subscript the research takes for a level, and the validation are
-in Section 14.9 of that document. Tests: `nest_records_carried.mlir`,
+refusals and the validation are in Section 14.9 of that document. A level of the record
+may be a loop's counter plus a constant (the research takes a subscript such as `k + 2`
+for the level): the lowering rewrites the record's forms to the counter and compares them
+with the nest's as before (Section 14.10). Tests: `nest_records_carried.mlir`,
 `nest_records_carried_refusals.mlir`, `nest_records_carried_tables.mlir`,
 `nest_carried_e2e.py`.
 

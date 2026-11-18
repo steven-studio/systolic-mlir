@@ -53,6 +53,16 @@
 // SEARCHLESS: remark: GEMM not lowered from its record: nest 0 of car_tables_while: the record's status is NOT_VERIFIED: the ordered fold is not verified: Theorem 13 is UNKNOWN (not checked)
 // SEARCHLESS-NOT: remark:
 //
+// A level that is the counter plus a constant is taken only with closed forms to check it
+// through. A record with none (these, by tables) and its K level one further on is refused.
+// RUN: %python %S/Inputs/edit_nest_records.py %S/Inputs/nest_records_carried_tables.json k-level-shift@car_tables_iter > %t.levelshift.json
+// RUN: systolic-opt %s --systolic-declare-fpga-fleet --affine-matmul-to-systolic="nest-records=%t.levelshift.json record-driven=true" 2>&1 | FileCheck %s --check-prefix=LEVELSHIFT
+// LEVELSHIFT: remark: GEMM not lowered from its record: nest 0 of car_tables_iter: level 2 of the record is loop 2 of the nest plus 1, and the record has no closed forms to check that against the nest's indices
+// LEVELSHIFT-LABEL: func.func @car_tables_iter(
+// LEVELSHIFT-NOT: systolic.matmul_tile
+// LEVELSHIFT: iter_args
+// LEVELSHIFT-LABEL: func.func @car_tables_twin(
+//
 // Without record-driven nothing is lowered and nothing is said.
 // STAGE2-NOT: remark:
 

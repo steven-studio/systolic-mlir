@@ -21,7 +21,7 @@ no records, which runs the original program with its carried subscripts, with th
 each variant of records and options:
 
   driven        records made with --index-invariants, every pair of roots authorized;
-                record-driven: every carrying nest but the strict one is lowered, by formulas,
+                record-driven: every nest but the strict one is lowered, by formulas,
                 the three of flat arrays by tables
   searchless    records made without --index-invariants; record-driven. No nest is lowered by
                 formulas. A carrying nest whose record is VERIFIED but for the closed forms
@@ -65,6 +65,8 @@ FUNCTIONS = [
      "statements": [e2e.product("c", "a", "b", BOX, views=OFFSET, carry=K_CARRIED, **memref("scf"))]},
     {"name": "car_while", "element": "f32", "arrays": OFFSET_ABC,
      "statements": [e2e.product("c", "a", "b", BOX, views=OFFSET, carry=K_CARRIED, **memref("while"))]},
+    # (Of the control the research takes the subscript k + 2 itself for the K level, from 2 to
+    # 14; the lowering takes that level for the counter plus 2 and checks it through the views.)
     {"name": "car_plain", "element": "f32", "arrays": OFFSET_ABC,
      "statements": [e2e.product("c", "a", "b", BOX, views=OFFSET, **memref("scf"))]},
     # Mixed loops: affine.for around scf.while around scf.for, the innermost carrying.
@@ -88,6 +90,19 @@ FUNCTIONS = [
      "arrays": [("a", 18, 17, False), ("b", 17, 9, False), ("c", 18, 9, True)],
      "statements": [e2e.product("c", "a", "b", SHIFTED, views=OFFSET, carry=K_CARRIED,
                                 **memref(("scf", "while", "scf")))]},
+    # The counter is the second value the scf.while carries, the subscript the first: the
+    # counter is the one the comparison reads.
+    {"name": "car_second", "element": "f32", "arrays": OFFSET_ABC,
+     "statements": [e2e.product("c", "a", "b", BOX, views=OFFSET, carry=K_CARRIED, counter_place="second",
+                                **memref("while"))]},
+    # The carried subscript is stepped before it is read: it starts at 1, and the body reads
+    # the carried value plus 1. An scf.for, and an scf.while.
+    {"name": "car_step_first", "element": "f32", "arrays": OFFSET_ABC,
+     "statements": [e2e.product("c", "a", "b", BOX, views=OFFSET, carry=K_CARRIED, carry_step="before",
+                                **memref("scf"))]},
+    {"name": "car_step_first_while", "element": "f32", "arrays": OFFSET_ABC,
+     "statements": [e2e.product("c", "a", "b", BOX, views=OFFSET, carry=K_CARRIED, carry_step="before",
+                                **memref("while"))]},
     # Tables: flat arrays, the index constants before the nest (the research proposes no closed
     # form for such views, with index invariants or without). The flat index is arith of a
     # carried subscript, which the tables take at each iteration from the recurrence in the IR.
@@ -107,12 +122,8 @@ FUNCTIONS = [
     {"name": "car_strict", "element": "f32", "arrays": OFFSET_ABC,
      "statements": [e2e.product("c", "a", "b", BOX, views=OFFSET, carry=K_CARRIED, flag=False, **memref("scf"))]},
 ]
-# Not lowered, and run on the host. car_strict by the floating-point policy. car_plain, the
-# control, by a limit that is older than carried indices and is none of theirs: its subscript
-# k + 2 is computed in the body, the research takes the subscript itself for the K level of the
-# record (from 2 to 14), and the lowering finds that level is not the loop (from 0 to 12). Its
-# record is VERIFIED all the same; it is run and compared like the others.
-KEPT = {("car_strict", 0), ("car_plain", 0)}
+# Not lowered, and run on the host: by the floating-point policy.
+KEPT = {("car_strict", 0)}
 CARRYING = {(f["name"], 0) for f in FUNCTIONS if f["statements"][0]["carry"]}
 # Verified but for the closed forms, with index invariants or without, and lowered by tables.
 TABLED = {("car_tables_iter", 0), ("car_tables_while", 0), ("car_tables_twin", 0)}

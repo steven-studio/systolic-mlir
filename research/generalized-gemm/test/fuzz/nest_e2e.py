@@ -64,7 +64,7 @@ class Failure(Exception):
 
 def product(c, a, b, bounds, order="ijk", views=None, flag=True, first=True, access="affine",
             constants="inside", loops="affine", bounds_at="outside", compare="slt", step="counter+1",
-            bound_in_before=False, carry=()):
+            bound_in_before=False, carry=(), carry_step="after", counter_place="first"):
     """`access`: "affine" reads and writes with affine.load and affine.store; "memref" with
     memref.load and memref.store, each index computed by arith (a counter times its scale plus
     its constant; a flat array's index is row * columns + column). A view entry is (role,
@@ -84,13 +84,16 @@ def product(c, a, b, bounds, order="ijk", views=None, flag=True, first=True, acc
     computed by arith from the counter but carried by the loop of its role, an scf.for
     (iter_args) or scf.while: started at the constant the view gives at the loop's first
     iteration and stepped by the view's scale each iteration (arith.addi, or arith.subi for a
-    negative scale), so it has the view's value at every iteration."""
+    negative scale), so it has the view's value at every iteration. `carry_step` "before": the
+    loop carries the index one step behind and the body steps it first, reads the stepped value
+    and hands that on (the subscript is the carried value plus the step). `counter_place`
+    "second" (scf.while): the carried indices come before the counter among the loop's values."""
     views = views or {"c": [("i", 1, 0), ("j", 1, 0)], "a": [("i", 1, 0), ("k", 1, 0)],
                       "b": [("k", 1, 0), ("j", 1, 0)]}
     return {"kind": "product", "c": c, "a": a, "b": b, "bounds": bounds, "order": order, "views": views,
             "flag": flag, "first": first, "access": access, "constants": constants, "loops": loops,
             "bounds_at": bounds_at, "compare": compare, "step": step, "bound_in_before": bound_in_before,
-            "carry": tuple(carry)}
+            "carry": tuple(carry), "carry_step": carry_step, "counter_place": counter_place}
 
 
 def loop_kinds(statement):
@@ -275,18 +278,30 @@ def mlir_function(function):
                     if r == role:
                         out.append((f"{operand}cx{d}n{number}", scale * bounds[role][0] + offset, scale))
                 return out
+            early = statement.get("carry_step", "after") == "before"
+            def held(name):
+                """The name of a carried index as the loop hands it to the body."""
+                return f"%{name}pre" if early else f"%{name}"
+            def handed(name):
+                """The name of the value the loop hands on."""
+                return f"%{name}" if early else f"%{name}next"
             def bound_constants(role):
                 low, high = bounds[role]
                 out = [f"%{role}lo{number} = arith.constant {low} : index",
                        f"%{role}hi{number} = arith.constant {high} : index",
                        f"%{role}st{number} = arith.constant 1 : index"]
                 for name, start, step in carried(role):
-                    out += [f"%{name}start = arith.constant {start} : index",
+                    out += [f"%{name}start = arith.constant {start - step if early else start} : index",
                             f"%{name}step = arith.constant {abs(step)} : index"]
                 return out
             def carried_steps(role, indent):
+                if early:
+                    return []
                 return [indent + f"  %{name}next = arith.{'addi' if step >= 0 else 'subi'} %{name}, %{name}step : index"
                         for name, start, step in carried(role)]
+            if early:
+                body = [pad + f"%{name} = arith.{'addi' if step >= 0 else 'subi'} %{name}pre, %{name}step : index"
+                        for role in statement["order"] for name, start, step in carried(role)] + body
             if outside:
                 for depth, role in enumerate(statement["order"]):
                     if kinds[depth] != "affine":
@@ -308,10 +323,10 @@ def mlir_function(function):
                     results = f"%{role}res{number}" + (f":{len(mine)}" if len(mine) > 1 else "")
                     lines.append(indent + f"{results} = scf.for %{role}{number} = %{role}lo{number} to %{role}hi{number} "
                                  f"step %{role}st{number} iter_args(" +
-                                 ", ".join(f"%{name} = %{name}start" for name, _, _ in mine) + ") -> (" +
+                                 ", ".join(f"{held(name)} = %{name}start" for name, _, _ in mine) + ") -> (" +
                                  ", ".join("index" for _ in mine) + ") {")
                     closers.append(carried_steps(role, indent) +
-                                   [indent + "  scf.yield " + ", ".join(f"%{name}next" for name, _, _ in mine) + " : " +
+                                   [indent + "  scf.yield " + ", ".join(handed(name) for name, _, _ in mine) + " : " +
                                     ", ".join("index" for _ in mine), indent + "}"])
                     continue
                 if kinds[depth] == "scf":
@@ -333,21 +348,27 @@ def mlir_function(function):
                 # The indices it carries besides: each forwarded as it is, an argument of the body.
                 more = len(mine)
                 types = ", ".join(["index"] * (1 + more))
+                def placed(counter_text, others):
+                    """The loop's values in their order: the counter first, or after the indices."""
+                    values = [counter_text] + others
+                    if statement.get("counter_place", "first") == "second":
+                        values = others + [counter_text]
+                    return ", ".join(values)
                 lines += [indent + f"%{role}res{number}" + (f":{1 + more}" if more else "") +
-                          f" = scf.while ({counter} = %{role}lo{number}" +
-                          "".join(f", %{name}w = %{name}start" for name, _, _ in mine) + ") : " +
-                          f"({types}) -> " + (f"({types})" if more else "index") + " {"] + before + \
+                          " = scf.while (" +
+                          placed(f"{counter} = %{role}lo{number}", [f"%{name}w = %{name}start" for name, _, _ in mine]) +
+                          ") : " + f"({types}) -> " + (f"({types})" if more else "index") + " {"] + before + \
                          [indent + f"  %{role}cmp{number} = arith.cmpi {predicate}, {operands[0]}, {operands[1]} : index",
-                          indent + f"  scf.condition(%{role}cmp{number}) {counter}" +
-                          "".join(f", %{name}w" for name, _, _ in mine) + f" : {types}",
+                          indent + f"  scf.condition(%{role}cmp{number}) " +
+                          placed(counter, [f"%{name}w" for name, _, _ in mine]) + f" : {types}",
                           indent + "} do {",
-                          indent + f"^bb0(%{role}{number}: index" + "".join(f", %{name}: index" for name, _, _ in mine) + "):"]
+                          indent + "^bb0(" + placed(f"%{role}{number}: index", [f"{held(name)}: index" for name, _, _ in mine]) + "):"]
                 stepped = (f"%{role}{number}, %{role}st{number}" if statement.get("step", "counter+1") == "counter+1"
                            else f"%{role}st{number}, %{role}{number}")
                 closers.append([indent + f"  %{role}nx{number} = arith.addi {stepped} : index"] +
                                carried_steps(role, indent) +
-                               [indent + f"  scf.yield %{role}nx{number}" +
-                                "".join(f", %{name}next" for name, _, _ in mine) + f" : {types}",
+                               [indent + "  scf.yield " +
+                                placed(f"%{role}nx{number}", [handed(name) for name, _, _ in mine]) + f" : {types}",
                                 indent + "}"])
             lines += body
             for close in reversed(closers):

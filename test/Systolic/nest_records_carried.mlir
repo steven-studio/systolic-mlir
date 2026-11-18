@@ -1,10 +1,9 @@
 // RUN: systolic-opt %s --systolic-declare-fpga-fleet --affine-matmul-to-systolic="nest-records=%S/Inputs/nest_records_carried.json record-driven=true report=true" -o /dev/null 2>&1 | FileCheck %s --check-prefix=REMARK
 // RUN: systolic-opt %s --systolic-declare-fpga-fleet --affine-matmul-to-systolic="nest-records=%S/Inputs/nest_records_carried.json record-driven=true" | FileCheck %s --check-prefix=TILES
 // RUN: systolic-opt %s --systolic-declare-fpga-fleet --affine-matmul-to-systolic="nest-records=%S/Inputs/nest_records_carried.json record-driven=true" --lower-systolic-matmul-tile-to-fpga=async=true | FileCheck %s --check-prefix=ASYNC
-// RUN: systolic-opt %s --systolic-declare-fpga-fleet --affine-matmul-to-systolic="nest-records=%S/Inputs/nest_records_carried_searchless.json record-driven=true report=true" 2>&1 | FileCheck %s --check-prefix=SEARCHLESS --implicit-check-not=systolic.matmul_tile
+// RUN: systolic-opt %s --systolic-declare-fpga-fleet --affine-matmul-to-systolic="nest-records=%S/Inputs/nest_records_carried_searchless.json record-driven=true report=true" -o /dev/null 2>&1 | FileCheck %s --check-prefix=SEARCHLESS
 // RUN: systolic-opt %s --systolic-declare-fpga-fleet --affine-matmul-to-systolic="nest-records=%S/Inputs/nest_records_carried.json report=true" -o /dev/null 2>&1 | FileCheck %s --check-prefix=STAGE2 --allow-empty
 // RUN: systolic-opt %s --systolic-declare-fpga-fleet --affine-matmul-to-systolic="report=true" | FileCheck %s --check-prefix=OFFIR --implicit-check-not=systolic.matmul_tile
-//
 // GEMMs whose subscripts their loops carry, lowered from their records (stage 3 of
 // docs/GENERALIZED_GEMM_SCOPE.md; docs/GENERALIZED_GEMM_STATEMENT_BV.md, Section 14.9). A
 // subscript here is no arithmetic of a counter: an scf.for (iter_args) or a counting scf.while
@@ -16,23 +15,26 @@
 // does not take the recurrence on the record's word (Systolic/NestRecordLowering.h): it reads
 // start and step from the loop in front of it, as start + step * (counter - lower), and the
 // record's view must be that form, dimension by dimension.
-//
 // Inputs/nest_records_carried.json is what generalized-gemm-nest-report --index-invariants says
 // of this file (every pair of roots authorized, 64-bit index);
 // Inputs/nest_records_carried_searchless.json what it says without --index-invariants. Both are
 // written and checked by research/generalized-gemm/test/fuzz/nest_gate_records.py. The @car_
 // functions are nest_carried_e2e.py's, which runs them and compares every result with the
-// original program's; the three after them are read here only. nest_records_carried_refusals.mlir
+// original program's; the five after them are read here only. nest_records_carried_refusals.mlir
 // has the refusals.
+// Nest by nest in program order. One nest stays as written: @car_strict, by the floating-point
+// policy. Nothing is lowered by the production recognizer here.
 //
-// Nest by nest in program order. Two nests stay as written: @car_strict by the floating-point
-// policy, and @car_plain, the control that carries nothing (its subscript is k + 2 by arith): the
-// research reads that sum as the K level, from 2 to 14, where the lowering takes a record whose
-// levels are the loops' counters. Nothing is lowered by the production recognizer here.
+// A level of the record that is a loop's counter plus a constant. Of @car_plain, the control
+// that carries nothing (its subscript is k + 2 by arith), of @offset_while_second and of
+// @step_then_use the research takes the subscript itself for the K level: from 2 to 14, where
+// the loop runs from 0 to 12, and views that read the level as it is. The lowering takes the
+// level for the counter plus the difference of the lower bounds, 2, rewrites the record's
+// forms to the counter, and they must then be the forms it read from the nest.
 // REMARK-NOT: affine GEMM
 // REMARK: remark: GEMM 16x8x12 of nest 0 of car_iter lowered from its record as 5 exact region(s) (formulas:
 // REMARK: remark: GEMM 16x8x12 of nest 0 of car_while lowered from its record as 5 exact region(s) (formulas:
-// REMARK: remark: GEMM not lowered from its record: nest 0 of car_plain: level 2 of the record is not loop 2 of the nest: axis, direction or bounds differ
+// REMARK: remark: GEMM 16x8x12 of nest 0 of car_plain lowered from its record as 5 exact region(s) (formulas:
 // REMARK: remark: GEMM 16x8x12 of nest 0 of car_mixed lowered from its record as 5 exact region(s) (formulas:
 // REMARK: remark: GEMM 16x8x12 of nest 0 of car_outer lowered from its record as 5 exact region(s) (formulas:
 // REMARK: remark: GEMM 16x8x12 of nest 0 of car_step2 lowered from its record as 5 exact region(s) (formulas:
@@ -41,6 +43,8 @@
 // REMARK: remark: GEMM 16x8x12 of nest 0 of offset_iter lowered from its record as 5 exact region(s) (formulas:
 // REMARK: remark: GEMM 16x8x12 of nest 0 of offset_while lowered from its record as 5 exact region(s) (formulas:
 // REMARK: remark: GEMM 16x8x12 of nest 0 of down lowered from its record as 5 exact region(s) (formulas:
+// REMARK: remark: GEMM 16x8x12 of nest 0 of offset_while_second lowered from its record as 5 exact region(s) (formulas:
+// REMARK: remark: GEMM 16x8x12 of nest 0 of step_then_use lowered from its record as 5 exact region(s) (formulas:
 // REMARK-NOT: remark:
 //
 // Each lowered nest is gone, its tiles where it stood: no loop is left to carry the index.
@@ -53,8 +57,9 @@
 // TILES-NOT: {{scf\.while|scf\.for|affine\.for|iter_args}}
 // TILES: return
 // TILES-LABEL: func.func @car_plain(
-// TILES-NOT: systolic.matmul_tile
-// TILES: scf.for
+// TILES: memref.subview %arg0[0, 2] [16, 12] [1, 1]
+// TILES-COUNT-5: systolic.matmul_tile
+// TILES-NOT: {{scf\.while|scf\.for|affine\.for|iter_args}}
 // TILES: return
 // TILES-LABEL: func.func @car_mixed(
 // TILES-COUNT-5: systolic.matmul_tile
@@ -90,6 +95,14 @@
 // TILES-COUNT-5: systolic.matmul_tile
 // TILES-NOT: {{scf\.while|scf\.for|affine\.for|iter_args}}
 // TILES: return
+// TILES-LABEL: func.func @offset_while_second(
+// TILES-COUNT-5: systolic.matmul_tile
+// TILES-NOT: {{scf\.while|scf\.for|affine\.for|iter_args}}
+// TILES: return
+// TILES-LABEL: func.func @step_then_use(
+// TILES-COUNT-5: systolic.matmul_tile
+// TILES-NOT: {{scf\.while|scf\.for|affine\.for|iter_args}}
+// TILES: return
 //
 // (The operands of @offset_iter, checked above, are subviews that start at column 2 of A and
 // row 2 of B: the recurrence's start, read from the loop, and the tiles read 12 columns and 12
@@ -103,6 +116,8 @@
 // ASYNC: call @fpga_gemm_begin
 // ASYNC: call @fpga_gemm_wait
 // ASYNC-LABEL: func.func @car_plain(
+// ASYNC: call @fpga_gemm_begin
+// ASYNC: call @fpga_gemm_wait
 // ASYNC-LABEL: func.func @car_mixed(
 // ASYNC: call @fpga_gemm_begin
 // ASYNC: call @fpga_gemm_wait
@@ -127,10 +142,10 @@
 // ASYNC: call @fpga_gemm_wait
 //
 // Records made without index invariants: no carrying nest is verified, and none is lowered.
-// @car_plain's record is the same either way.
+// @car_plain's record is the same either way, and so is its lowering.
 // SEARCHLESS: remark: GEMM not lowered from its record: nest 0 of car_iter: the record's status is NOT_VERIFIED: no candidate for the nest: the search is UNKNOWN (no candidate was verified within the limits)
 // SEARCHLESS: remark: GEMM not lowered from its record: nest 0 of car_while: the record's status is NOT_VERIFIED: no candidate for the nest: the search is UNKNOWN (no candidate was verified within the limits)
-// SEARCHLESS: remark: GEMM not lowered from its record: nest 0 of car_plain: level 2 of the record is not loop 2 of the nest: axis, direction or bounds differ
+// SEARCHLESS: remark: GEMM 16x8x12 of nest 0 of car_plain lowered from its record as 5 exact region(s) (formulas:
 // SEARCHLESS: remark: GEMM not lowered from its record: nest 0 of car_mixed: the record's status is NOT_VERIFIED: no candidate for the nest: the search is UNKNOWN (no candidate was verified within the limits)
 // SEARCHLESS: remark: GEMM not lowered from its record: nest 0 of car_outer: the record's status is NOT_VERIFIED: no candidate for the nest: the search is UNKNOWN (no candidate was verified within the limits)
 // SEARCHLESS: remark: GEMM not lowered from its record: nest 0 of car_step2: the record's status is NOT_VERIFIED: no candidate for the nest: the search is UNKNOWN (no candidate was verified within the limits)
@@ -139,6 +154,8 @@
 // SEARCHLESS: remark: GEMM not lowered from its record: nest 0 of offset_iter: the record's status is NOT_VERIFIED: no candidate for the nest: the search is UNKNOWN (no candidate was verified within the limits)
 // SEARCHLESS: remark: GEMM not lowered from its record: nest 0 of offset_while: the record's status is NOT_VERIFIED: no candidate for the nest: the search is UNKNOWN (no candidate was verified within the limits)
 // SEARCHLESS: remark: GEMM not lowered from its record: nest 0 of down: the record's status is NOT_VERIFIED: no candidate for the nest: the search is UNKNOWN (no candidate was verified within the limits)
+// SEARCHLESS: remark: GEMM not lowered from its record: nest 0 of offset_while_second: the record's status is NOT_VERIFIED: no candidate for the nest: the search is UNKNOWN (no candidate was verified within the limits)
+// SEARCHLESS: remark: GEMM not lowered from its record: nest 0 of step_then_use: the record's status is NOT_VERIFIED: the ordered fold is verified at POINT only, and not over the scope
 // SEARCHLESS-NOT: remark:
 //
 // The record must say what the loop does. A record of @offset_iter whose views start one
@@ -159,13 +176,35 @@
 // STEP: scf.while
 // STEP-LABEL: func.func @down(
 //
-// The program changed after its records were made: the recurrences of @offset_iter and
-// @offset_while start at 3. The start is a constant the binding reads, so the records are of
+// A level that is the counter plus a constant is checked through the views, and by nothing
+// else. The record of @car_plain with its K level one further on (from 3 to 15) and its views
+// as they were is a record of other cells of A and B: refused with the form read from the
+// nest. The record of @offset_iter with its K level named 3 further on and its views of A and B
+// 3 less says the same nest otherwise: lowered, to the same tiles.
+// RUN: %python %S/Inputs/edit_nest_records.py %S/Inputs/nest_records_carried.json k-level-shift@car_plain > %t.levelshift.json
+// RUN: systolic-opt %s --systolic-declare-fpga-fleet --affine-matmul-to-systolic="nest-records=%t.levelshift.json record-driven=true" 2>&1 | FileCheck %s --check-prefix=LEVELSHIFT
+// LEVELSHIFT: remark: GEMM not lowered from its record: nest 0 of car_plain: dimension 1 of the record's view of A is not the nest's index: 1 * loop 2 + 2
+// LEVELSHIFT-LABEL: func.func @car_plain(
+// LEVELSHIFT-NOT: systolic.matmul_tile
+// LEVELSHIFT: scf.for
+// LEVELSHIFT-LABEL: func.func @car_mixed(
+// RUN: %python %S/Inputs/edit_nest_records.py %S/Inputs/nest_records_carried.json k-level-rename@offset_iter > %t.rename.json
+// RUN: systolic-opt %s --systolic-declare-fpga-fleet --affine-matmul-to-systolic="nest-records=%t.rename.json record-driven=true report=true" 2>&1 | FileCheck %s --check-prefix=RENAME
+// RENAME: remark: GEMM 16x8x12 of nest 0 of offset_iter lowered from its record as 5 exact region(s) (formulas:
+// RENAME-LABEL: func.func @offset_iter(
+// RENAME: memref.subview %arg0[0, 2] [16, 12] [1, 1]
+// RENAME: memref.subview %arg1[2, 0] [12, 8] [1, 1]
+// RENAME-COUNT-5: systolic.matmul_tile
+// RENAME-LABEL: func.func @offset_while(
+//
+// The program changed after its records were made: the recurrences of @offset_iter,
+// @offset_while and @offset_while_second start at 3. The start is a constant the binding reads, so the records are of
 // another version of those nests; the other nests are lowered as before.
 // RUN: sed -e 's/%c2 = arith.constant 2 : index/%c2 = arith.constant 3 : index/' %s > %t.stale.mlir
 // RUN: systolic-opt %t.stale.mlir --systolic-declare-fpga-fleet --affine-matmul-to-systolic="nest-records=%S/Inputs/nest_records_carried.json record-driven=true" 2>&1 | FileCheck %s --check-prefix=STALE
 // STALE: remark: GEMM not lowered from its record: nest 0 of offset_iter: the record's binding is not this nest's: the record is about another version of the nest, or another nest
 // STALE: remark: GEMM not lowered from its record: nest 0 of offset_while: the record's binding is not this nest's: the record is about another version of the nest, or another nest
+// STALE: remark: GEMM not lowered from its record: nest 0 of offset_while_second: the record's binding is not this nest's: the record is about another version of the nest, or another nest
 // STALE-LABEL: func.func @car_iter(
 // STALE-COUNT-5: systolic.matmul_tile
 // STALE-LABEL: func.func @offset_iter(
@@ -546,6 +585,59 @@ func.func @down(%a: memref<16x15xf32>, %b: memref<15x8xf32>, %c: memref<16x8xf32
         %s = arith.addf %z, %m fastmath<reassoc> : f32
         memref.store %s, %c[%i, %j] : memref<16x8xf32>
         %x1 = arith.subi %x, %c1 : index
+        scf.yield %x1 : index
+      }
+    }
+  }
+  return
+}
+// The counter is the second carried value and the index the first: the counter is the one
+// the comparison reads, whatever its place.
+func.func @offset_while_second(%a: memref<16x15xf32>, %b: memref<15x8xf32>, %c: memref<16x8xf32> {llvm.noalias}) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %c8 = arith.constant 8 : index
+  %c12 = arith.constant 12 : index
+  %c16 = arith.constant 16 : index
+  scf.for %i = %c0 to %c16 step %c1 {
+    scf.for %j = %c0 to %c8 step %c1 {
+      %xf, %kf = scf.while (%x = %c2, %k = %c0) : (index, index) -> (index, index) {
+        %go = arith.cmpi slt, %k, %c12 : index
+        scf.condition(%go) %x, %k : index, index
+      } do {
+      ^bb0(%xb: index, %kb: index):
+        %z = memref.load %c[%i, %j] : memref<16x8xf32>
+        %p = memref.load %a[%i, %xb] : memref<16x15xf32>
+        %q = memref.load %b[%xb, %j] : memref<15x8xf32>
+        %m = arith.mulf %p, %q : f32
+        %s = arith.addf %z, %m fastmath<reassoc> : f32
+        memref.store %s, %c[%i, %j] : memref<16x8xf32>
+        %x1 = arith.addi %xb, %c1 : index
+        %k1 = arith.addi %kb, %c1 : index
+        scf.yield %x1, %k1 : index, index
+      }
+    }
+  }
+  return
+}
+// The index is stepped before it is read: the subscript is x + 1, from 1, so K + 2.
+func.func @step_then_use(%a: memref<16x15xf32>, %b: memref<15x8xf32>, %c: memref<16x8xf32> {llvm.noalias}) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c8 = arith.constant 8 : index
+  %c12 = arith.constant 12 : index
+  %c16 = arith.constant 16 : index
+  scf.for %i = %c0 to %c16 step %c1 {
+    scf.for %j = %c0 to %c8 step %c1 {
+      %xf = scf.for %k = %c0 to %c12 step %c1 iter_args(%x = %c1) -> (index) {
+        %x1 = arith.addi %x, %c1 : index
+        %z = memref.load %c[%i, %j] : memref<16x8xf32>
+        %p = memref.load %a[%i, %x1] : memref<16x15xf32>
+        %q = memref.load %b[%x1, %j] : memref<15x8xf32>
+        %m = arith.mulf %p, %q : f32
+        %s = arith.addf %z, %m fastmath<reassoc> : f32
+        memref.store %s, %c[%i, %j] : memref<16x8xf32>
         scf.yield %x1 : index
       }
     }

@@ -1571,8 +1571,7 @@ stepped *before* it is used, the research takes the subscript itself for the K l
 the record (from 2 to 14), and the lowering refuses: "level 2 of the record is not loop 2
 of the nest: axis, direction or bounds differ". The record is VERIFIED; the nest stays on
 the host (`car_plain`, the control of the end-to-end run; `offset_while_second`;
-`step_then_use`). The fix belongs to the record's level convention, not to the lowering's
-comparison.
+`step_then_use`). That was the state at `aaa9563`; Section 14.10 takes these nests.
 
 **Validation** (2 processes at most; logs under
 `~/work/semgus-invariant-validation/gemm-index/logs/`, `low-*`):
@@ -1603,5 +1602,77 @@ research CTest registration `generalized-gemm-nest-carried-e2e` was added and no
 through `ctest` (the harness was run directly). No test reaches the lowering's overflow
 check of a recurrence's form. Not built: a start or step that is a function argument
 (the invariant is proved, the record says "a symbolic offset is not mapped"), an index
-carried across two loops, and the level convention above. Scalar invariants M2 to M4 and
+carried across two loops. Scalar invariants M2 to M4 and
 external SemGuS: not started.
+
+### 14.10 A level that is a loop's counter plus a constant (integration branch, 2026-11-18)
+
+**The limit, as it was.** A record's levels are the research's own coordinates of the
+iteration space. When every access reads the K loop through one and the same sum (`k + 2`
+by `arith.addi` in the body; a carried index stepped before it is read), the research
+takes that sum for the K level: `lower` 2, `upper` 14, views that read the level as it is
+(A = [level0, level2]). The record is VERIFIED and says the same GEMM as one with level
+from 0 to 12 and A = [level0, level2 + 2]. The lowering compared each level's bounds with
+its loop's and refused.
+
+**What the lowering does now.** For each level it takes the difference of the lower
+bounds, `shift` = the record's lower minus the loop's (0 for every record the older tests
+have). It requires the record's upper bound to be the loop's plus that shift: the same
+number of iterations, in the same direction. It then rewrites every closed form of the
+record from levels to counters (level = counter + shift, so a term c * level adds
+c * shift to the constant), and the rewritten form must be, as before, exactly the form
+the lowering read from the nest's index arithmetic. The extents, the tiles and the
+operand subviews are computed from the loops' bounds and the IR's forms, never from the
+record's.
+
+**Why this is no weaker a check.** What the record is trusted for is unchanged: its
+status and its binding. The comparison that ties its views to the IR is still an equality
+of affine forms, dimension by dimension; a shift is a change of the name of an iteration,
+fixed by the two lower bounds, and a wrong shift leaves forms that differ. Three things
+are refused that a looser reading would take:
+
+| Record | Refusal |
+| --- | --- |
+| K level of `car_plain` one further on (3 to 15), views as they were | "dimension 1 of the record's view of A is not the nest's index: 1 * loop 2 + 2" |
+| a level whose extent is not the loop's (upper 15 for a loop to 16; the older `LEVEL` tests) | "level 0 of the record is not loop 0 of the nest: axis, direction or bounds differ" |
+| a shifted level in a record with no closed forms (VERIFIED_NOT_MAPPED, by tables) | "level 2 of the record is loop 2 of the nest plus 1, and the record has no closed forms to check that against the nest's indices" |
+
+And one is taken that says the same nest otherwise: the record of `offset_iter` with its K
+level named 3 further on and its views of A and B 3 less is lowered to the same subviews
+and tiles (`RENAME`). The record's `value` field of a level (the research's term for it)
+is not read. Descending levels are refused as before.
+
+**Measured.**
+
+| Nest | Record | Before | Now |
+| --- | --- | --- | --- |
+| `car_plain`: `k + 2` by arith in the body, no carried value | VERIFIED, with index invariants or without | refused | formulas, either way |
+| `offset_while_second`: the counter is the second carried value | VERIFIED with index invariants; NOT_VERIFIED without | refused | formulas; refused without |
+| `step_then_use`: the carried index is stepped, then read | VERIFIED with index invariants; NOT_VERIFIED without (fold at POINT only) | refused | formulas; refused without |
+
+The last two moved from `nest_records_carried_refusals.mlir` to
+`nest_records_carried.mlir`. Without index invariants `car_second` and the two
+`car_step_first` programs are NOT_VERIFIED too, and stay on the host.
+
+**Validation.**
+
+2 processes at most; logs under `~/work/semgus-invariant-validation/gemm-index/logs/`,
+`lvl-*`; scripts `gemm-index/scripts/level.sh` and `level-e2e.sh`; the kept work of the
+end-to-end run in `gemm-index/integration/lowering/e2e-carried/`.
+
+| Check | Result |
+| --- | --- |
+| Production lit, `Systolic/nest_records*` | 12 of 12, the older `LEVEL`, `EXTENT` and `AXES` refusals among them, unchanged |
+| Lowered, linked, run and compared (`nest_carried_e2e.py`, 14 functions, 6 variants) | 336 function runs compared with the reference in plain C, 0 failures; 282 with every bit kept, 54 with lowered cells that differ within their bound. Four functions have a record whose K level is from 2 to 14 over a loop from 0 to 12, and each is lowered by formulas, run with 5 device invocations and compared, synchronous and asynchronous: `car_plain` (the control), `car_second` (the shape of `offset_while_second`), `car_step_first` (the shape of `step_then_use`) and `car_step_first_while`. Run on the host with no records, the same programs give the same reference |
+| End to end, the stages before (shift 0 everywhere) | stage 3: 180 runs; `scf.for`: 260; `scf.while`: 440; 0 failures each |
+| Records | the five record files remade for this change equal what the research tool says, byte for byte |
+| Gate mutation (a kill only by a test's own FileCheck) | 9 mutants of the level reading: 5 new (an extent not compared for a shifted level; a shifted level taken with no closed forms; the shift left out of the forms; the shift taken the other way; the record's lower bound taken for the loop's), 1 repaired, 3 older ones around it: 9 KILLED, none by a crash or a timeout |
+
+The generator of the end-to-end programs gained two spellings (the counter as the second
+carried value; a carried index stepped before it is read); for every spec that existed it
+prints the same module as before, compared text for text.
+
+**Not run.** The rest of the production lit suite; the rest of the mutation catalogue;
+sanitizers; the nest oracle; the research tests (no research source changed). **Not
+built.** A level that is a multiple of a counter or runs the other way; a shifted level
+for the tables path.

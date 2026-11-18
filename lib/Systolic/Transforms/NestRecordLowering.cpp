@@ -981,7 +981,14 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
     return refuse("");
   if (levels->size() != 3)
     return refuse("the record has " + std::to_string(levels->size()) + " levels, and the band 3 loops");
-  std::array<int64_t, 3> lower{}, extent{}; // per axis
+  // A level of the record is a loop of the band, or that loop's counter plus a constant: the
+  // research may take for a level the subscript every access reads (k + 2, from 2 to 14, of a
+  // loop from 0 to 12). Such a level names the same iterations in the same order, each by a
+  // number `shift` greater. The shift is the difference of the lower bounds, the extents must
+  // be equal, and nothing more is taken on the record's word: the record's closed forms are
+  // rewritten to the loop's counter with it and must then be the forms read from the IR.
+  std::array<int64_t, 3> lower{}, extent{}; // per axis, of the band's loop
+  std::array<int64_t, 3> shift{0, 0, 0};    // per band position: the record's level minus the counter
   std::array<unsigned, 3> levelOf{};        // per axis: the band position
   std::array<bool, 3> seen{false, false, false};
   for (unsigned l = 0; l < 3; ++l) {
@@ -997,13 +1004,20 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
     unsigned a = 0;
     while (a < 3 && *axis != kAxisName[a])
       ++a;
-    if (a == 3 || seen[a] || *descending || *lo != band[l].lower || *hi != band[l].upper || *hi <= *lo)
+    std::optional<int64_t> by = llvm::checkedSub(*lo, band[l].lower);
+    std::optional<int64_t> end = by ? llvm::checkedAdd(band[l].upper, *by) : std::nullopt;
+    if (a == 3 || seen[a] || *descending || !end || *hi != *end || *hi <= *lo)
       return refuse("level " + std::to_string(l) + " of the record is not loop " + std::to_string(l) +
                     " of the nest: axis, direction or bounds differ");
+    if (*by != 0 && at.viewsUnmapped)
+      return refuse("level " + std::to_string(l) + " of the record is loop " + std::to_string(l) +
+                    " of the nest plus " + std::to_string(*by) +
+                    ", and the record has no closed forms to check that against the nest's indices");
     seen[a] = true;
     levelOf[a] = l;
-    lower[a] = *lo;
-    extent[a] = *hi - *lo;
+    shift[l] = *by;
+    lower[a] = band[l].lower;
+    extent[a] = band[l].upper - band[l].lower;
     const json::Array *list = fields.array(*axes, kAxisName[a], "gemm.axes");
     if (!list)
       return refuse("");
@@ -1254,6 +1268,14 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
       if (!sum)
         return failure();
       form.coefficient[*level] = *sum;
+    }
+    // The record's levels to the band's counters: level = counter + shift.
+    for (unsigned l = 0; l < 3; ++l) {
+      std::optional<int64_t> term = llvm::checkedMul(form.coefficient[l], shift[l]);
+      std::optional<int64_t> sum = term ? llvm::checkedAdd(form.constant, *term) : std::nullopt;
+      if (!sum)
+        return failure();
+      form.constant = *sum;
     }
     return success();
   };

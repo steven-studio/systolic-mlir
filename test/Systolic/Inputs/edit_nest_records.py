@@ -50,6 +50,17 @@ def edit(functions, name):
     elif name == "k-step":
         # A's column stepping by 2 with K: the view of another recurrence's step.
         gemm["views"]["A"]["dimensions"][1]["levels"][0]["coefficient"] = 2
+    elif name == "k-level-shift":
+        # The K level one further on, its views as they were: a record of other iterations.
+        gemm["levels"][2]["lower"] += 1
+        gemm["levels"][2]["upper"] += 1
+    elif name == "k-level-rename":
+        # The K level named from another origin, 3 further on, and the views of A and B that
+        # read it 3 less: the same nest, said otherwise.
+        gemm["levels"][2]["lower"] += 3
+        gemm["levels"][2]["upper"] += 3
+        gemm["views"]["A"]["dimensions"][1]["constant"] -= 3
+        gemm["views"]["B"]["dimensions"][0]["constant"] -= 3
     elif name == "root":
         gemm["views"]["A"]["root"]["root"] = 1
     elif name == "flags":

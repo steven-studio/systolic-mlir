@@ -8,10 +8,7 @@
 // on the record passes and a check on the nest refuses: the lowering reads the recurrence from
 // the loop, and no record makes it read one that is not there.
 //
-// The research tool's own records. The last two are verified, and their loops carry what the
-// lowering reads; they are refused because the research takes the carried subscript itself as
-// the K level (from 2 to 14), where the lowering takes a record whose levels are the loops'
-// counters: the limit @car_plain of nest_records_carried.mlir meets with no carried value.
+// The research tool's own records.
 // RUN: systolic-opt %s --systolic-declare-fpga-fleet --affine-matmul-to-systolic="nest-records=%S/Inputs/nest_records_carried_refusals.json record-driven=true report=true" -o /dev/null 2>&1 | FileCheck %s --check-prefix=HONEST
 // HONEST: remark: GEMM not lowered from its record: nest 0 of start_dynamic: the record's status is NOT_VERIFIED
 // HONEST: remark: GEMM not lowered from its record: nest 0 of step_dynamic: the record's status is NOT_VERIFIED
@@ -26,8 +23,6 @@
 // HONEST: remark: GEMM not lowered from its record: nest 0 of while_forwards_other: the record's status is NOT_VERIFIED
 // HONEST: remark: GEMM not lowered from its record: nest 0 of while_last_value_read: a loop of the nest (scf.while) carries 2 values from one iteration to the next, and the record's lowering takes a counting loop, which carries its counter and indices stepped by a constant only: value 1 has its last value read by the code after the loop, and the lowering would remove the loop that makes it; value 0 (index) is stepped by a constant; value 1 (index) is stepped by a constant
 // HONEST: remark: GEMM not lowered from its record: nest 0 of while_stepped_by_counter: the record's status is NOT_VERIFIED
-// HONEST: remark: GEMM not lowered from its record: nest 0 of offset_while_second: level 2 of the record is not loop 2 of the nest: axis, direction or bounds differ
-// HONEST: remark: GEMM not lowered from its record: nest 0 of step_then_use: level 2 of the record is not loop 2 of the nest: axis, direction or bounds differ
 // HONEST-NOT: remark:
 //
 // Every nest stays as written: no tile is made.
@@ -57,10 +52,6 @@
 // KEPT-LABEL: func.func @while_last_value_read(
 // KEPT: {{iter_args|scf\.while}}
 // KEPT-LABEL: func.func @while_stepped_by_counter(
-// KEPT: {{iter_args|scf\.while}}
-// KEPT-LABEL: func.func @offset_while_second(
-// KEPT: {{iter_args|scf\.while}}
-// KEPT-LABEL: func.func @step_then_use(
 // KEPT: {{iter_args|scf\.while}}
 //
 // A verified record on the nest's own binding: the lowering's own reading of the loop refuses.
@@ -430,59 +421,6 @@ func.func @while_stepped_by_counter(%a: memref<16x99xf32>, %b: memref<99x8xf32>,
         %k1 = arith.addi %kb, %c1 : index
         %x1 = arith.addi %x, %kb : index
         scf.yield %k1, %x1 : index, index
-      }
-    }
-  }
-  return
-}
-// The counter is the second carried value and the index the first: the counter is the one
-// the comparison reads, whatever its place.
-func.func @offset_while_second(%a: memref<16x15xf32>, %b: memref<15x8xf32>, %c: memref<16x8xf32> {llvm.noalias}) {
-  %c0 = arith.constant 0 : index
-  %c1 = arith.constant 1 : index
-  %c2 = arith.constant 2 : index
-  %c8 = arith.constant 8 : index
-  %c12 = arith.constant 12 : index
-  %c16 = arith.constant 16 : index
-  scf.for %i = %c0 to %c16 step %c1 {
-    scf.for %j = %c0 to %c8 step %c1 {
-      %xf, %kf = scf.while (%x = %c2, %k = %c0) : (index, index) -> (index, index) {
-        %go = arith.cmpi slt, %k, %c12 : index
-        scf.condition(%go) %x, %k : index, index
-      } do {
-      ^bb0(%xb: index, %kb: index):
-        %z = memref.load %c[%i, %j] : memref<16x8xf32>
-        %p = memref.load %a[%i, %xb] : memref<16x15xf32>
-        %q = memref.load %b[%xb, %j] : memref<15x8xf32>
-        %m = arith.mulf %p, %q : f32
-        %s = arith.addf %z, %m fastmath<reassoc> : f32
-        memref.store %s, %c[%i, %j] : memref<16x8xf32>
-        %x1 = arith.addi %xb, %c1 : index
-        %k1 = arith.addi %kb, %c1 : index
-        scf.yield %x1, %k1 : index, index
-      }
-    }
-  }
-  return
-}
-// The index is stepped before it is read: the subscript is x + 1, from 1, so K + 2.
-func.func @step_then_use(%a: memref<16x15xf32>, %b: memref<15x8xf32>, %c: memref<16x8xf32> {llvm.noalias}) {
-  %c0 = arith.constant 0 : index
-  %c1 = arith.constant 1 : index
-  %c8 = arith.constant 8 : index
-  %c12 = arith.constant 12 : index
-  %c16 = arith.constant 16 : index
-  scf.for %i = %c0 to %c16 step %c1 {
-    scf.for %j = %c0 to %c8 step %c1 {
-      %xf = scf.for %k = %c0 to %c12 step %c1 iter_args(%x = %c1) -> (index) {
-        %x1 = arith.addi %x, %c1 : index
-        %z = memref.load %c[%i, %j] : memref<16x8xf32>
-        %p = memref.load %a[%i, %x1] : memref<16x15xf32>
-        %q = memref.load %b[%x1, %j] : memref<15x8xf32>
-        %m = arith.mulf %p, %q : f32
-        %s = arith.addf %z, %m fastmath<reassoc> : f32
-        memref.store %s, %c[%i, %j] : memref<16x8xf32>
-        scf.yield %x1 : index
       }
     }
   }
