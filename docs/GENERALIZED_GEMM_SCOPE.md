@@ -1222,7 +1222,7 @@ Nothing of what the tool does changes with this; it is where things are.
 | --- | --- |
 | `lib/Systolic/Transforms/AffineMatmulToSystolic.cpp` | the pass and its options; the affine pipeline (the steps that rewrite nests, the GEMMs of its recognizer, the general and kernel-coset paths); the dense lowering, `lowerOne`. With `nest-records` it hands the module, its options, its numbering of the GEMMs and `lowerOne` to the records mode, and does nothing else |
 | `include/Systolic/GeneralizedMatmulToSystolic.h`, `lib/Systolic/Transforms/GeneralizedMatmulToSystolic.cpp` | the records mode, stages 2 and 3: the refusal of the pass's other paths, the file of records, the bindings, which nest goes which way and what is said of a nest that is left; and the emission of a GEMM from its record, by the formulas or by the tables. Nests written with `scf.for` or `scf.while` and nests whose loops carry their subscripts come through here; what tells them apart is in the record and in `NestRecordLowering.cpp` |
-| `include/Systolic/MatmulTileLowering.h`, `lib/Systolic/Transforms/MatmulTileLowering.cpp` | what the two lowerings share, one implementation of each: the alias gate, an operand as a logical matrix and its view, the hardware plan's tiles as boxes of the domain, their emission (one numbering of the GEMMs), the write-back. The last three were written out once in each lowering before |
+| `include/Systolic/MatmulTileLowering.h`, `lib/Systolic/Transforms/MatmulTileLowering.cpp` | what the two lowerings share, one implementation of each: the alias gate, an operand as a logical matrix and its view, the hardware plan's tiles (as boxes of the domain for the affine lowering, which proves on its own domain that they partition it; proven here an exact partition of the M x N x K box for the lowering from records), their emission (one numbering of the GEMMs), the write-back. The last three were written out once in each lowering before |
 | `NestRecordGate`, `NestRecordLowering`, `NestBinding` | as they were |
 
 It is not a pass of its own. The mode needs the binding of every nest from the module as the
@@ -1241,6 +1241,15 @@ each of the sixteen options the pass hands to the mode, set in turn in every rec
 gives the same with both tools; the production lit suite, the five end-to-end suites and the
 sanitized tools pass as before; and the eleven mutants of the pass's entry and of the mode are
 killed as before, nine of them now in the new file (`nest_gate_mutation.py`, `R`).
+
+Since then the records mode's file names no box. The proof that the plan's tiles are an exact
+partition of the M x N x K box (each inside it, no two overlapping, together as many points
+as it has), which `lowerRecordDriven` made itself after the plan, is made by the overload of
+`planMatmulTiles` it calls, which gives back the number of tiles; the three refusals are word
+for word what they were. `MatmulTileLowering.h` declares `LogicalBox` instead of including
+`AffineMatmulPartitioning.h`, so that file reaches the records mode by no path. The affine
+lowering takes the boxes as before and proves the partition on its own domain
+(`partitionLogicalMatmul`): it is not changed.
 
 ## The thesis
 

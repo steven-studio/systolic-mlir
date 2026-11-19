@@ -9,6 +9,7 @@
 
 #include "Systolic/MatmulTileLowering.h"
 
+#include "Systolic/AffineMatmulPartitioning.h"
 #include "Systolic/SystolicOps.h"
 
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
@@ -18,6 +19,8 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
+
+#include "llvm/Support/CheckedArithmetic.h"
 
 #include <functional>
 
@@ -286,6 +289,53 @@ LogicalResult mlir::systolic::planMatmulTiles(
     whole.extent = {M, N, K};
     boxes.push_back(whole);
   }
+  return success();
+}
+
+LogicalResult mlir::systolic::planMatmulTiles(
+    Operation *anchor, int64_t M, int64_t N, int64_t K,
+    const SystolicFleet &fleet, double sharedReadBytesPerCycle,
+    StringRef costModel, StringRef operandPath,
+    std::optional<SystolicTilePlan> &plan, size_t &regions, std::string &why,
+    bool &hardError) {
+  SmallVector<LogicalBox> boxes;
+  if (failed(planMatmulTiles(anchor, M, N, K, fleet, sharedReadBytesPerCycle,
+                             costModel, operandPath, plan, boxes, why,
+                             hardError)))
+    return failure();
+  // The tiles are an exact partition of the box: inside it, pairwise disjoint, and as many
+  // points as it has (a domain counted from 0 along I, J and K).
+  {
+    const std::array<int64_t, 3> extent{M, N, K};
+    std::optional<int64_t> volume = int64_t(0);
+    for (auto [b, box] : llvm::enumerate(boxes)) {
+      for (unsigned a = 0; a < 3; ++a)
+        if (box.lower[a] < 0 || box.extent[a] <= 0 || box.lower[a] + box.extent[a] > extent[a]) {
+          why = "the partition is not exact: a tile leaves the box";
+          return failure();
+        }
+      for (unsigned o = 0; o < b; ++o) {
+        bool apart = false;
+        for (unsigned a = 0; a < 3; ++a)
+          apart = apart || boxes[o].lower[a] + boxes[o].extent[a] <= box.lower[a] ||
+                  box.lower[a] + box.extent[a] <= boxes[o].lower[a];
+        if (!apart) {
+          why = "the partition is not exact: two tiles overlap";
+          return failure();
+        }
+      }
+      std::optional<int64_t> v = llvm::checkedMul(box.extent[0], box.extent[1]);
+      v = v ? llvm::checkedMul(*v, box.extent[2]) : std::nullopt;
+      volume = volume && v ? llvm::checkedAdd(*volume, *v) : std::nullopt;
+    }
+    std::optional<int64_t> whole = llvm::checkedMul(M, N);
+    whole = whole ? llvm::checkedMul(*whole, K) : std::nullopt;
+    if (!volume || !whole || *volume != *whole) {
+      why = "the partition is not exact: the tiles do not cover the box";
+      return failure();
+    }
+  }
+  regions = boxes.size();
   return success();
 }
 

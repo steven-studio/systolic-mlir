@@ -9,21 +9,24 @@
 //   LogicalOperand               an operand as the logical matrix it holds
 //   materializeOperandView       that matrix as a rank-2 view of the operand's memref
 //   planMatmulTiles              the hardware plan of the M x N x K GEMM on the fleet, and
-//                                its tiles as boxes of the iteration domain
+//                                its tiles: as boxes of the iteration domain, for a caller
+//                                that proves on a domain of its own that they partition it;
+//                                or proven here an exact partition of the M x N x K box,
+//                                for a caller whose domain is that box
 //   emitMatmulTiles              the plan's tiles as one systolic GEMM, or without a fleet
 //                                one unassigned systolic.matmul_tile
 //   writeBackMatmulResult        the tiles' result written into C's buffer
 //
 // Nothing here decides that a nest is a GEMM or which matrix an operand holds. The callers
-// do, each by its own analysis, and each keeps its own checks: the bounds, that the tiles
-// are an exact partition of its domain, the floating-point policy.
+// do, each by its own analysis, and each keeps its own checks: the bounds, the
+// floating-point policy, and, where the domain is not simply the box, that the tiles are
+// an exact partition of it.
 //
 //===----------------------------------------------------------------------===//
 
 #ifndef SYSTOLIC_MATMULTILELOWERING_H
 #define SYSTOLIC_MATMULTILELOWERING_H
 
-#include "Systolic/AffineMatmulPartitioning.h"
 #include "Systolic/SystolicTilePlan.h"
 
 #include "mlir/IR/AffineExpr.h"
@@ -44,6 +47,11 @@
 
 namespace mlir {
 namespace systolic {
+
+/// A tile as a box of the iteration domain (Systolic/AffineMatmulPartitioning.h). Only the
+/// affine lowering, which proves the partition on a domain of its own, takes the boxes; a
+/// file that does not has no use for that header and does not get it from this one.
+struct LogicalBox;
 
 /// Whether `input` provably does not overlap `output`, the memref the GEMM
 /// writes. The loop nest reads A and B while it writes C; the tiles read all
@@ -185,6 +193,19 @@ LogicalResult planMatmulTiles(Operation *anchor, int64_t M, int64_t N, int64_t K
                               std::optional<SystolicTilePlan> &plan,
                               SmallVectorImpl<LogicalBox> &boxes, std::string &why,
                               bool &hardError);
+
+/// The same plan for a GEMM whose iteration domain is the whole box [0, M) x [0, N) x
+/// [0, K), with the proof that goes with it: the tiles are an exact partition of the box,
+/// each inside it, no two overlapping, and together as many points as it has (64-bit
+/// arithmetic, checked). `regions` is how many they are; the caller needs no box. A plan
+/// that fails is the hard error of the overload above; a partition that is not exact is a
+/// refusal that says which of the three fails in `why`, and no hard error.
+LogicalResult planMatmulTiles(Operation *anchor, int64_t M, int64_t N, int64_t K,
+                              const SystolicFleet &fleet,
+                              double sharedReadBytesPerCycle, StringRef costModel,
+                              StringRef operandPath,
+                              std::optional<SystolicTilePlan> &plan, size_t &regions,
+                              std::string &why, bool &hardError);
 
 /// The tiles of C += A * B on the three tensors, at the builder's point, and the tensor of
 /// the result. With a plan: its tiles on the fleet's accelerators (emitSystolicTilePlan), as

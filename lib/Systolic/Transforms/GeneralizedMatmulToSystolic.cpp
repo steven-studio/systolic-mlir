@@ -12,7 +12,6 @@
 
 #include "Systolic/GeneralizedMatmulToSystolic.h"
 
-#include "Systolic/AffineMatmulPartitioning.h"
 #include "Systolic/MatmulTileLowering.h"
 #include "Systolic/NestRecordGate.h"
 #include "Systolic/NestRecordLowering.h"
@@ -28,7 +27,6 @@
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/StringExtras.h"
-#include "llvm/Support/CheckedArithmetic.h"
 
 #include <array>
 #include <optional>
@@ -83,43 +81,12 @@ struct RecordsMode : GeneralizedMatmulOptions {
       return failure();
     }
 
+    // The plan, its tiles proven an exact partition of the M x N x K box, and how many they are.
     std::optional<SystolicTilePlan> plan;
-    SmallVector<LogicalBox> boxes;
-    if (failed(planMatmulTiles(anchor, M, N, K, fleet, sharedReadBytesPerCycle, costModel, operandPath,
-                               plan, boxes, why, hardError)))
+    size_t regions = 0;
+    if (failed(planMatmulTiles(anchor, M, N, K, fleet, sharedReadBytesPerCycle, costModel,
+                               operandPath, plan, regions, why, hardError)))
       return failure();
-    // The tiles are an exact partition of the box: inside it, pairwise disjoint, and as many
-    // points as it has (a domain counted from 0 along I, J and K).
-    {
-      const std::array<int64_t, 3> extent{M, N, K};
-      std::optional<int64_t> volume = int64_t(0);
-      for (auto [b, box] : llvm::enumerate(boxes)) {
-        for (unsigned a = 0; a < 3; ++a)
-          if (box.lower[a] < 0 || box.extent[a] <= 0 || box.lower[a] + box.extent[a] > extent[a]) {
-            why = "the partition is not exact: a tile leaves the box";
-            return failure();
-          }
-        for (unsigned o = 0; o < b; ++o) {
-          bool apart = false;
-          for (unsigned a = 0; a < 3; ++a)
-            apart = apart || boxes[o].lower[a] + boxes[o].extent[a] <= box.lower[a] ||
-                    box.lower[a] + box.extent[a] <= boxes[o].lower[a];
-          if (!apart) {
-            why = "the partition is not exact: two tiles overlap";
-            return failure();
-          }
-        }
-        std::optional<int64_t> v = llvm::checkedMul(box.extent[0], box.extent[1]);
-        v = v ? llvm::checkedMul(*v, box.extent[2]) : std::nullopt;
-        volume = volume && v ? llvm::checkedAdd(*volume, *v) : std::nullopt;
-      }
-      std::optional<int64_t> whole = llvm::checkedMul(M, N);
-      whole = whole ? llvm::checkedMul(*whole, K) : std::nullopt;
-      if (!volume || !whole || *volume != *whole) {
-        why = "the partition is not exact: the tiles do not cover the box";
-        return failure();
-      }
-    }
 
     // ------------------------------------------------------------------
     // Materialize. Every check is done; from here on the nest is replaced.
@@ -179,7 +146,6 @@ struct RecordsMode : GeneralizedMatmulOptions {
       // The tables: constant globals of element offsets; A, B and C gathered into matrices,
       // the tiles on those, C scattered back.
       ModuleOp module = getOperation();
-      MLIRContext *ctx = builder.getContext();
       auto symbolName = [&](StringRef base) {
         std::string name = base.str();
         for (unsigned n = 1; SymbolTable::lookupSymbolIn(module, name); ++n)
@@ -213,7 +179,6 @@ struct RecordsMode : GeneralizedMatmulOptions {
             ArrayRef<OpFoldResult>{builder.getIndexAttr(1)});
         matrix[x] = memref::AllocOp::create(builder, loc, MemRefType::get(shapeOf[x], elementType));
       }
-      (void)ctx;
       // matrix[x][r][c] = operand x at table[x][r][c], or the reverse for the scatter.
       auto copy = [&](unsigned x, bool scatter) {
         auto rows = affine::AffineForOp::create(builder, loc, 0, shapeOf[x][0], 1);
@@ -247,7 +212,7 @@ struct RecordsMode : GeneralizedMatmulOptions {
     if (report) {
       auto remark = anchor->emitRemark()
                     << "GEMM " << M << "x" << N << "x" << K << " of " << g.where
-                    << " lowered from its record as " << boxes.size() << " exact region(s) ("
+                    << " lowered from its record as " << regions << " exact region(s) ("
                     << g.summary << ")";
       if (plan)
         remark << " on " << fleet.resources.size()
