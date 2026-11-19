@@ -1221,8 +1221,8 @@ Nothing of what the tool does changes with this; it is where things are.
 | File | What it holds |
 | --- | --- |
 | `lib/Systolic/Transforms/AffineMatmulToSystolic.cpp` | the pass and its options; the affine pipeline (the steps that rewrite nests, the GEMMs of its recognizer, the general and kernel-coset paths); the dense lowering, `lowerOne`. With `nest-records` it hands the module, its options, its numbering of the GEMMs and `lowerOne` to the records mode, and does nothing else |
-| `include/Systolic/GeneralizedMatmulToSystolic.h`, `lib/Systolic/Transforms/GeneralizedMatmulToSystolic.cpp` | the records mode, stages 2 and 3: the refusal of the pass's other paths, the file of records, the bindings, which nest goes which way and what is said of a nest that is left; and the emission of a GEMM from its record, by the formulas or by the tables. Nests written with `scf.for` or `scf.while` and nests whose loops carry their subscripts come through here; what tells them apart is in the record and in `NestRecordLowering.cpp` |
-| `include/Systolic/MatmulTileLowering.h`, `lib/Systolic/Transforms/MatmulTileLowering.cpp` | what the two lowerings share, one implementation of each: the alias gate, an operand as a logical matrix and its view, the hardware plan's tiles (as boxes of the domain for the affine lowering, which proves on its own domain that they partition it; proven here an exact partition of the M x N x K box for the lowering from records), their emission (one numbering of the GEMMs), the write-back. The last three were written out once in each lowering before |
+| `include/Systolic/GeneralizedMatmulToSystolic.h`, `lib/Systolic/Transforms/GeneralizedMatmulToSystolic.cpp` | the records mode, stages 2 and 3: the refusal of the pass's other paths, the file of records, the bindings, which nest goes which way and what is said of a nest that is left; and the lowering of a GEMM from its record: its gates, its plan, and what is emitted in which order, by the formulas or by the tables (how each step is emitted is `MatmulTileLowering`'s). Nests written with `scf.for` or `scf.while` and nests whose loops carry their subscripts come through here; what tells them apart is in the record and in `NestRecordLowering.cpp` |
+| `include/Systolic/MatmulTileLowering.h`, `lib/Systolic/Transforms/MatmulTileLowering.cpp` | what the two lowerings share, one implementation of each: the alias gate, an operand as a logical matrix and its view, the operands of the tables (the constant tables, the gathered matrices, the scatter of C), the hardware plan's tiles (as boxes of the domain for the affine lowering, which proves on its own domain that they partition it; proven here an exact partition of the M x N x K box for the lowering from records), their emission (one numbering of the GEMMs), the write-back. The last three were written out once in each lowering before |
 | `NestRecordGate`, `NestRecordLowering`, `NestBinding` | as they were |
 
 It is not a pass of its own. The mode needs the binding of every nest from the module as the
@@ -1250,6 +1250,18 @@ for word what they were. `MatmulTileLowering.h` declares `LogicalBox` instead of
 `AffineMatmulPartitioning.h`, so that file reaches the records mode by no path. The affine
 lowering takes the boxes as before and proves the partition on its own domain
 (`partitionLogicalMatmul`): it is not changed.
+
+And it makes no operation of the affine, arith or memref dialects and looks up no symbol: what
+the tables branch of `lowerRecordDriven` emitted itself (the constant `memref.global` tables,
+the flat views, the allocated matrices, the two `affine.for` nests of the gather and of the
+scatter) is `materializeTableOperands` and `scatterTableResult` of `MatmulTileLowering`, the
+statements as they were, called as the other branch calls `materializeOperandView`. The file
+includes none of those dialects' headers. Of its object's dependencies (`ninja -t deps`),
+`MemRef.h` is gone; `AffineOps.h`, `Arith.h` and `SymbolTable.h` are still there, not for
+anything the file emits but through the interfaces its walk reads: `AffineMatmulAnalysis.h`
+(a `LogicalMatmul` holds affine operations, and stage 2 is a gate on the GEMMs the affine
+recognizer finds), `NestRecordGate.h` (`arith::FastMathFlags` in one declaration) and
+`mlir/IR/BuiltinOps.h` (`ModuleOp`).
 
 ## The thesis
 

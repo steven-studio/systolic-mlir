@@ -2,11 +2,13 @@
 //
 // The records mode of --affine-matmul-to-systolic: see Systolic/GeneralizedMatmulToSystolic.h.
 // Here are the mode's walk (which nest goes which way, and what is said of a nest that is
-// left) and the emission of a GEMM from its record, by formulas or by tables. The record's
-// own checks are NestRecordGate.cpp's, the nest's own checks and the formulas and tables are
-// NestRecordLowering.cpp's, and the dense lowering of a GEMM the affine recognizer finds is
-// the pass's (AffineMatmulToSystolic.cpp, lowerOne), called through
-// DenseMatmulLowering.
+// left) and the lowering of a GEMM from its record: its gates, its plan, and what is emitted
+// in which order, by the record's formulas or by its tables. How each step is emitted is
+// MatmulTileLowering.cpp's: this file makes no operation of the affine, arith or memref
+// dialects and looks up no symbol. The record's own checks are NestRecordGate.cpp's, the
+// nest's own checks and the formulas and tables are NestRecordLowering.cpp's, and the dense
+// lowering of a GEMM the affine recognizer finds is the pass's (AffineMatmulToSystolic.cpp,
+// lowerOne), called through DenseMatmulLowering.
 //
 //===----------------------------------------------------------------------===//
 
@@ -16,17 +18,12 @@
 #include "Systolic/NestRecordGate.h"
 #include "Systolic/NestRecordLowering.h"
 
-#include "mlir/Dialect/Affine/IR/AffineOps.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/Builders.h"
-#include "mlir/IR/SymbolTable.h"
 #include "mlir/Interfaces/DataLayoutInterfaces.h"
 
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/StringExtras.h"
 
 #include <array>
 #include <optional>
@@ -145,66 +142,17 @@ struct RecordsMode : GeneralizedMatmulOptions {
     } else {
       // The tables: constant globals of element offsets; A, B and C gathered into matrices,
       // the tiles on those, C scattered back.
-      ModuleOp module = getOperation();
-      auto symbolName = [&](StringRef base) {
-        std::string name = base.str();
-        for (unsigned n = 1; SymbolTable::lookupSymbolIn(module, name); ++n)
-          name = base.str() + "_" + std::to_string(n);
-        return name;
-      };
-      std::string stem = "__nest_table_" + g.where;
-      for (char &ch : stem)
-        if (!llvm::isAlnum(ch) && ch != '_')
-          ch = '_';
-      std::array<Value, 3> table, flat, matrix;
-      static const char *const kName[] = {"A", "B", "C"};
-      for (unsigned x = 0; x < 3; ++x) {
-        auto tableTy = MemRefType::get(shapeOf[x], builder.getI64Type());
-        auto values = DenseElementsAttr::get(RankedTensorType::get(shapeOf[x], builder.getI64Type()),
-                                             ArrayRef<int64_t>(g.operands[x].table));
-        std::string name = symbolName(stem + "_" + kName[x]);
-        {
-          OpBuilder::InsertionGuard guard(builder);
-          builder.setInsertionPointToStart(module.getBody());
-          memref::GlobalOp::create(builder, loc, name, builder.getStringAttr("private"), tableTy,
-                                   values, /*constant=*/true, /*alignment=*/IntegerAttr());
-        }
-        table[x] = memref::GetGlobalOp::create(builder, loc, tableTy, name);
-        auto memTy = cast<MemRefType>(g.operands[x].memref.getType());
-        const int64_t elements = memTy.getNumElements();
-        auto flatTy = MemRefType::get({elements}, elementType);
-        flat[x] = memref::ReinterpretCastOp::create(
-            builder, loc, flatTy, g.operands[x].memref, /*offset=*/builder.getIndexAttr(0),
-            ArrayRef<OpFoldResult>{builder.getIndexAttr(elements)},
-            ArrayRef<OpFoldResult>{builder.getIndexAttr(1)});
-        matrix[x] = memref::AllocOp::create(builder, loc, MemRefType::get(shapeOf[x], elementType));
-      }
-      // matrix[x][r][c] = operand x at table[x][r][c], or the reverse for the scatter.
-      auto copy = [&](unsigned x, bool scatter) {
-        auto rows = affine::AffineForOp::create(builder, loc, 0, shapeOf[x][0], 1);
-        OpBuilder::InsertionGuard guard(builder);
-        builder.setInsertionPointToStart(rows.getBody());
-        auto columns = affine::AffineForOp::create(builder, loc, 0, shapeOf[x][1], 1);
-        builder.setInsertionPointToStart(columns.getBody());
-        SmallVector<Value, 2> rc{rows.getInductionVar(), columns.getInductionVar()};
-        Value offset64 = affine::AffineLoadOp::create(builder, loc, table[x], rc);
-        Value offset = arith::IndexCastOp::create(builder, loc, builder.getIndexType(), offset64);
-        if (!scatter) {
-          Value v = memref::LoadOp::create(builder, loc, flat[x], ValueRange{offset});
-          affine::AffineStoreOp::create(builder, loc, v, matrix[x], rc);
-        } else {
-          Value v = affine::AffineLoadOp::create(builder, loc, matrix[x], rc);
-          memref::StoreOp::create(builder, loc, v, flat[x], ValueRange{offset});
-        }
-      };
+      std::array<TableOperand, 3> operand;
       for (unsigned x = 0; x < 3; ++x)
-        copy(x, /*scatter=*/false);
-      Value aTensor = asTensor(matrix[0], shapeOf[0], /*writable=*/false);
-      Value bTensor = asTensor(matrix[1], shapeOf[1], /*writable=*/false);
-      Value cTensor = asTensor(matrix[2], shapeOf[2], /*writable=*/true);
+        operand[x] = {g.operands[x].memref, g.operands[x].table, shapeOf[x]};
+      TableOperands tables =
+          materializeTableOperands(builder, loc, getOperation(), g.where, operand, elementType);
+      Value aTensor = asTensor(tables.matrix[0], shapeOf[0], /*writable=*/false);
+      Value bTensor = asTensor(tables.matrix[1], shapeOf[1], /*writable=*/false);
+      Value cTensor = asTensor(tables.matrix[2], shapeOf[2], /*writable=*/true);
       Value result = runTiles(aTensor, bTensor, cTensor);
-      writeBackMatmulResult(builder, loc, result, matrix[2]);
-      copy(2, /*scatter=*/true);
+      writeBackMatmulResult(builder, loc, result, tables.matrix[2]);
+      scatterTableResult(builder, loc, tables);
       // No dealloc: --systolic-runtime-to-llvm's buffer deallocation frees the three matrices
       // (an explicit dealloc of a buffer given to to_tensor is refused there).
     }

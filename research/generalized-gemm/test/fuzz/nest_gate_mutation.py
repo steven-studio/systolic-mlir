@@ -2,8 +2,9 @@
 """Stages 2 and 3 mutation test (docs/GENERALIZED_GEMM_SCOPE.md): the production gate on records
 of loop nests, and the lowering from records. Each mutant weakens one check of
 lib/Systolic/Transforms/NestRecordGate.cpp, of NestRecordLowering.cpp, of the pass's entry in
-AffineMatmulToSystolic.cpp, of the records mode and the emission in
-GeneralizedMatmulToSystolic.cpp, or of the binding in NestBinding.cpp, in a copy of the production
+AffineMatmulToSystolic.cpp, of the records mode and the lowering from records in
+GeneralizedMatmulToSystolic.cpp, of the tables' emission in MatmulTileLowering.cpp, or of the
+binding in NestBinding.cpp, in a copy of the production
 sources built in a scratch directory; the copy unmodified must pass first. The tests are the
 production tests of the gate and of the lowering from records: test/Systolic/nest_records.mlir,
 nest_records_refusals.mlir, nest_records_belts.mlir, nest_records_driven.mlir,
@@ -35,6 +36,7 @@ import sys
 G = "lib/Systolic/Transforms/NestRecordGate.cpp"
 P = "lib/Systolic/Transforms/AffineMatmulToSystolic.cpp"
 R = "lib/Systolic/Transforms/GeneralizedMatmulToSystolic.cpp"
+T = "lib/Systolic/Transforms/MatmulTileLowering.cpp"
 B = "lib/Systolic/Transforms/NestBinding.cpp"
 L = "lib/Systolic/Transforms/NestRecordLowering.cpp"
 
@@ -145,8 +147,16 @@ MUTANTS = [
      "    if (!g.reassoc && !allowFpReassociation) {\n", "    if (false) {\n"),
     ("the table budget option ignored", R, "*records, bound, loop, indexWidth, recordTableBudget, why);",
      "*records, bound, loop, indexWidth, mlir::systolic::kDefaultRecordTableBudget, why);"),
-    ("the operands not gathered", R, "        copy(x, /*scatter=*/false);\n", "        (void)x;\n"),
-    ("C not scattered back", R, "      copy(2, /*scatter=*/true);\n", ""),
+    # The tables' emission is MatmulTileLowering.cpp's (T): the gather inside
+    # materializeTableOperands, the scatter asked for by the lowering (R) and made by
+    # scatterTableResult (T).
+    ("the operands not gathered", T,
+     "    copyByTable(builder, loc, table[x], flat[x], matrix[x], operands[x].shape, /*scatter=*/false);\n",
+     "    (void)x;\n"),
+    ("C not scattered back", R, "      scatterTableResult(builder, loc, tables);\n", ""),
+    ("the scatter of C emits nothing", T,
+     "  copyByTable(builder, loc, tables.table[2], tables.flat[2], tables.matrix[2], tables.shape[2],\n"
+     "              /*scatter=*/true);\n", ""),
     # Stage 3, the nest's own checks (NestRecordLowering.cpp).
     ("an affine.for with bounds that are no constants or a step read", L,
      "      if (!a.hasConstantLowerBound() || !a.hasConstantUpperBound() || a.getStepAsInt() != 1)\n",

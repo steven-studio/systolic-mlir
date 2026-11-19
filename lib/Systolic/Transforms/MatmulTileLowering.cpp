@@ -1,9 +1,10 @@
 //===- MatmulTileLowering.cpp - What the GEMM lowerings share --------------===//
 //
-// The alias gate, an operand's view, the hardware plan's tiles, their emission and the
-// write-back: see Systolic/MatmulTileLowering.h. The alias gate, the operand's view and
-// the offsets of a view were AffineMatmulToSystolic.cpp's own; the other three were
-// written out once in the dense lowering and once in the lowering from records.
+// The alias gate, an operand's view, an operand gathered through a table, the hardware
+// plan's tiles, their emission and the write-back: see Systolic/MatmulTileLowering.h. The
+// alias gate, the operand's view and the offsets of a view were AffineMatmulToSystolic.cpp's
+// own; the plan, the tiles and the write-back were written out once in the dense lowering
+// and once in the lowering from records; the tables were the lowering from records' own.
 //
 //===----------------------------------------------------------------------===//
 
@@ -17,9 +18,11 @@
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/IR/SymbolTable.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
 
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/CheckedArithmetic.h"
 
 #include <functional>
@@ -360,4 +363,80 @@ void mlir::systolic::writeBackMatmulResult(OpBuilder &builder, Location loc,
       builder, loc, result, destination);
   writeBack.setRestrict(true);
   writeBack.setWritable(true);
+}
+
+/// matrix[r][c] = the operand's element at the offset table[r][c] (the gather), or the
+/// reverse (the scatter): two affine.for over the rows and the columns, the offset an i64
+/// of the table cast to index, the operand read or written as a flat buffer.
+static void copyByTable(OpBuilder &builder, Location loc, Value table, Value flat,
+                        Value matrix, std::array<int64_t, 2> shape, bool scatter) {
+  auto rows = affine::AffineForOp::create(builder, loc, 0, shape[0], 1);
+  OpBuilder::InsertionGuard guard(builder);
+  builder.setInsertionPointToStart(rows.getBody());
+  auto columns = affine::AffineForOp::create(builder, loc, 0, shape[1], 1);
+  builder.setInsertionPointToStart(columns.getBody());
+  SmallVector<Value, 2> rc{rows.getInductionVar(), columns.getInductionVar()};
+  Value offset64 = affine::AffineLoadOp::create(builder, loc, table, rc);
+  Value offset = arith::IndexCastOp::create(builder, loc, builder.getIndexType(), offset64);
+  if (!scatter) {
+    Value v = memref::LoadOp::create(builder, loc, flat, ValueRange{offset});
+    affine::AffineStoreOp::create(builder, loc, v, matrix, rc);
+  } else {
+    Value v = affine::AffineLoadOp::create(builder, loc, matrix, rc);
+    memref::StoreOp::create(builder, loc, v, flat, ValueRange{offset});
+  }
+}
+
+TableOperands mlir::systolic::materializeTableOperands(
+    OpBuilder &builder, Location loc, ModuleOp module, StringRef label,
+    const std::array<TableOperand, 3> &operands, Type elementType) {
+  auto symbolName = [&](StringRef base) {
+    std::string name = base.str();
+    for (unsigned n = 1; SymbolTable::lookupSymbolIn(module, name); ++n)
+      name = base.str() + "_" + std::to_string(n);
+    return name;
+  };
+  std::string stem = ("__nest_table_" + label).str();
+  for (char &ch : stem)
+    if (!llvm::isAlnum(ch) && ch != '_')
+      ch = '_';
+  std::array<Value, 3> table, flat, matrix;
+  static const char *const kName[] = {"A", "B", "C"};
+  for (unsigned x = 0; x < 3; ++x) {
+    auto tableTy = MemRefType::get(operands[x].shape, builder.getI64Type());
+    auto values = DenseElementsAttr::get(RankedTensorType::get(operands[x].shape, builder.getI64Type()),
+                                         ArrayRef<int64_t>(operands[x].table));
+    std::string name = symbolName(stem + "_" + kName[x]);
+    {
+      OpBuilder::InsertionGuard guard(builder);
+      builder.setInsertionPointToStart(module.getBody());
+      memref::GlobalOp::create(builder, loc, name, builder.getStringAttr("private"), tableTy,
+                               values, /*constant=*/true, /*alignment=*/IntegerAttr());
+    }
+    table[x] = memref::GetGlobalOp::create(builder, loc, tableTy, name);
+    auto memTy = cast<MemRefType>(operands[x].memref.getType());
+    const int64_t elements = memTy.getNumElements();
+    auto flatTy = MemRefType::get({elements}, elementType);
+    flat[x] = memref::ReinterpretCastOp::create(
+        builder, loc, flatTy, operands[x].memref, /*offset=*/builder.getIndexAttr(0),
+        ArrayRef<OpFoldResult>{builder.getIndexAttr(elements)},
+        ArrayRef<OpFoldResult>{builder.getIndexAttr(1)});
+    matrix[x] = memref::AllocOp::create(builder, loc, MemRefType::get(operands[x].shape, elementType));
+  }
+  // matrix[x][r][c] = operand x at table[x][r][c].
+  for (unsigned x = 0; x < 3; ++x)
+    copyByTable(builder, loc, table[x], flat[x], matrix[x], operands[x].shape, /*scatter=*/false);
+  TableOperands made;
+  made.matrix = matrix;
+  made.table = table;
+  made.flat = flat;
+  for (unsigned x = 0; x < 3; ++x)
+    made.shape[x] = operands[x].shape;
+  return made;
+}
+
+void mlir::systolic::scatterTableResult(OpBuilder &builder, Location loc,
+                                        const TableOperands &tables) {
+  copyByTable(builder, loc, tables.table[2], tables.flat[2], tables.matrix[2], tables.shape[2],
+              /*scatter=*/true);
 }

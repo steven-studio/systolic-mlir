@@ -8,6 +8,10 @@
 //   provablyDisjointFromOutput   the alias gate: A and B apart from C
 //   LogicalOperand               an operand as the logical matrix it holds
 //   materializeOperandView       that matrix as a rank-2 view of the operand's memref
+//   materializeTableOperands     the matrices of operands that are no view of their memref:
+//                                A, B and C gathered element by element through constant
+//                                tables of offsets
+//   scatterTableResult           and C's matrix written back through its table
 //   planMatmulTiles              the hardware plan of the M x N x K GEMM on the fleet, and
 //                                its tiles: as boxes of the iteration domain, for a caller
 //                                that proves on a domain of its own that they partition it;
@@ -32,6 +36,7 @@
 #include "mlir/IR/AffineExpr.h"
 #include "mlir/IR/AffineMap.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Value.h"
 #include "mlir/Support/LLVM.h"
@@ -220,6 +225,46 @@ Value emitMatmulTiles(OpBuilder &builder, Location loc, Value aTensor,
 /// one bufferization.materialize_in_destination, restrict and writable.
 void writeBackMatmulResult(OpBuilder &builder, Location loc, Value result,
                            Value destination);
+
+/// An operand whose rows x columns matrix is no view of its memref: element (r, c) of the
+/// matrix is the memref's element at the row-major offset `table[r * columns + c]`, an
+/// offset of the memref's static shape. The caller has the table from its own analysis and
+/// has checked every offset.
+struct TableOperand {
+  Value memref;
+  ArrayRef<int64_t> table;      // rows * columns offsets, row by row
+  std::array<int64_t, 2> shape; // rows, columns
+};
+
+/// What materializeTableOperands made of A, B and C (in that order).
+struct TableOperands {
+  /// The operands gathered: rows x columns buffers, what the tiles run on.
+  std::array<Value, 3> matrix;
+  /// For scatterTableResult: the tables (memref.get_global), the operands' memrefs as flat
+  /// buffers, and the shapes.
+  std::array<Value, 3> table, flat;
+  std::array<std::array<int64_t, 2>, 3> shape;
+};
+
+/// The matrices of A, B and C read through tables, at the builder's point. Per operand, in
+/// order: a private constant memref.global of its table at the start of `module`, named
+/// `__nest_table_<label>_A` (_B, _C) with every character of `label` that is no letter,
+/// digit or underscore made an underscore, and with _1, _2, ... after it while the module
+/// has a symbol of that name; memref.get_global of it; the operand's memref as a flat buffer
+/// of `elementType` (memref.reinterpret_cast); and a rows x columns memref.alloc of
+/// `elementType`. Then, per operand, the gather: matrix[r][c] = flat[table[r][c]], two
+/// affine.for. The matrices are not freed here and are not the caller's to free:
+/// --systolic-runtime-to-llvm's buffer deallocation frees them (an explicit dealloc of a
+/// buffer given to to_tensor is refused there).
+TableOperands materializeTableOperands(OpBuilder &builder, Location loc,
+                                       ModuleOp module, StringRef label,
+                                       const std::array<TableOperand, 3> &operands,
+                                       Type elementType);
+
+/// C's matrix written back to C's memref through C's table, at the builder's point:
+/// flat[table[r][c]] = matrix[r][c], two affine.for. After the tiles' result is in the
+/// matrix (writeBackMatmulResult).
+void scatterTableResult(OpBuilder &builder, Location loc, const TableOperands &tables);
 
 } // namespace systolic
 } // namespace mlir
