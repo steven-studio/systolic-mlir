@@ -66,3 +66,32 @@ module {
     func.return
   }
 }
+
+// -----
+
+// Constant bounds farther apart than a signed 64-bit integer holds: the box is over any
+// budget, and its extent must be found so without overflowing. Refused, the nest kept. (An
+// ordinary build refuses with or without the checked subtraction; a build with UBSan tells
+// the two apart.)
+
+// CHECK-LABEL: func.func @far_bounds
+// CHECK-NOT: systolic.matmul_tile
+// CHECK: affine.load
+// REMARK: source domain exceeds the point budget
+module {
+  func.func @far_bounds(%C: memref<16x16xf32> {llvm.noalias}, %A: memref<16x16xf32> {llvm.noalias}, %B: memref<16x16xf32> {llvm.noalias}) {
+    affine.for %i = -4611686018427387904 to 4611686018427387905 {
+      affine.for %j = 0 to 4 {
+        affine.for %k = 0 to 4 {
+          %t0 = affine.load %C[(((%i + %j) - (2 * %k)) + 6), (((%i - (2 * %j)) + %k) + 6)] : memref<16x16xf32>
+          %t1 = affine.load %A[(((%i + %j) - (2 * %k)) + 6), ((%i + %j) + %k)] : memref<16x16xf32>
+          %t2 = affine.load %B[((%i + %j) + %k), (((%i - (2 * %j)) + %k) + 6)] : memref<16x16xf32>
+          %t3 = arith.mulf %t1, %t2 fastmath<reassoc> : f32
+          %t4 = arith.addf %t0, %t3 fastmath<reassoc> : f32
+          affine.store %t4, %C[(((%i + %j) - (2 * %k)) + 6), (((%i - (2 * %j)) + %k) + 6)] : memref<16x16xf32>
+        }
+      }
+    }
+    func.return
+  }
+}
