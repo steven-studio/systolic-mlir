@@ -1023,15 +1023,17 @@ mlir::systolic::analyzeSymbolicRankPartition(Operation *anchor,
   }
 }
 
-// Phase C4a: symbolic single-reduction device lowering. The structural
-// recognition and the exact logical domain come from the symbolic rank-
-// partition analysis (no bounded point search); the stride-g reduction-fiber
-// cover is CERTIFIED by the C3 symbolic tile partition (buildSymbolicTilePartition),
-// which is what lets the det-9 congruence CASE 1 lower where the one-local
-// guarded path refuses. The finite source domain is then materialized into the
-// points/fibers the existing per-fiber emitter consumes; the partition gates
-// and bounds that materialization. Multi-dimensional reductions, non-tileable
-// contractions and any refusal fall through to failure (program unchanged).
+// Phase C4a: the bounded finite analysis of a general affine MAC. The
+// structural recognition and the exact logical domain come from the symbolic
+// rank-partition analysis (no bounded point search). The finite source domain
+// is then materialized, point by point inside its box and at most `budget`
+// points, into the points/fibers the existing per-fiber emitter consumes:
+// that, and nothing symbolic, is what lets the det-9 congruence CASE 1 lower
+// where the one-local guarded path refuses. The C3 symbolic tile partition
+// (buildSymbolicTilePartition) is computed beside it and decides nothing here:
+// neither what is lowered nor how much is materialized (strideCertified below
+// is not read). A nest the recognizer refuses, a box over the budget, an index
+// outside its memref or an overflow is a failure (program unchanged).
 FailureOr<GeneralAffineMatmul>
 mlir::systolic::analyzeGeneralAffineMatmul(Operation *anchor,
                                            std::string &why,
@@ -1088,8 +1090,8 @@ mlir::systolic::analyzeGeneralAffineMatmul(Operation *anchor,
   // congruence included); it legitimately refuses the degenerate output cases
   // this path also lowers -- a pure replication loop (an IV in no access) or a
   // singular output map (a free axis the output does not index) -- both of
-  // which fold correctly into each output's fiber. The certificate is recorded
-  // when available; it never widens what lowers beyond a recognized MAC.
+  // which fold correctly into each output's fiber. The verdict is computed and
+  // not kept: nothing below depends on it.
   std::string tileWhy;
   auto partition = logical::buildSymbolicTilePartition(
       accessMatrices, offsets, st.sourceDomain, sourceRank, sym->reductionOrder,
@@ -1116,8 +1118,12 @@ mlir::systolic::analyzeGeneralAffineMatmul(Operation *anchor,
     }
     lo[d] = *a;
     hi[d] = *b;
-    int64_t extent = *b - *a + 1;
-    if (extent <= 0 || volume > static_cast<int64_t>(budget) / extent) {
+    // The axis's extent, in checked arithmetic: bounds farther apart than an
+    // int64 holds are over any budget.
+    int64_t span, extent;
+    if (llvm::SubOverflow<int64_t>(*b, *a, span) ||
+        llvm::AddOverflow<int64_t>(span, int64_t(1), extent) || extent <= 0 ||
+        volume > static_cast<int64_t>(budget) / extent) {
       why = "source domain exceeds the point budget";
       return failure();
     }
@@ -1232,7 +1238,7 @@ mlir::systolic::analyzeGeneralAffineMatmul(Operation *anchor,
     why = "empty source domain";
     return failure();
   }
-  (void)strideCertified; // recorded certificate; emission is exact regardless.
+  (void)strideCertified; // not recorded and not consulted: the emission is exact regardless.
   return out;
 }
 
