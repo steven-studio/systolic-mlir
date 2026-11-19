@@ -107,7 +107,10 @@ MUTANTS = [
     # Coverage: a template that stops working must show.
     ("T1 removed", R, "tryAll(guardDistances(component))", "false"),
     ("T2 removed", R, "tryAll(modularDistances(component, inside))", "false"),
-    ("T3 removed", R, "tryAll(affineRanks(component, inside))", "false"),
+    # Both searches of an affine rank: the second proves what the first does when the first
+    # gives none, so the family is gone only with both.
+    ("T3 removed", R,
+     "tryAll(affineRanks(component, inside)) ||\n         tryAll(leastAffineRanks(component, inside))", "false"),
     ("T4 removed", R, "  if (!solve(rest, children))\n    return false;", "  if (!rest.empty())\n    return false;"),
     ("Houdini removed", R, "      for (const CutPath &path : in.set.paths)\n        if (path.to != program.exitLocation())\n          refine(path, active, changed);", "      active.clear();"),
 ]

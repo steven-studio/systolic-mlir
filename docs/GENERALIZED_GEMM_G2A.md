@@ -123,6 +123,7 @@ all earlier blocks did not stop, and `Inv` holds even at a state stuck on arriva
 | T1 guard distance | `ext(b) − ext(a) + c`, `c` in {0, 1}, at width `w+2`, keeping the comparison's signedness; both signs for `eq`/`ne` |
 | T2 modular distance | `c⁻¹·(t − x) mod 2^w`, for odd `c` with `x' = x + c` on every path of the SCC |
 | T3 bounded affine | `Σ aₖ·ext(xₖ) + a₀`, `\|aₖ\| ≤ 4`, up to 6 atoms, by CEGIS on bit-level counterexamples with QF_LIA |
+| T3 by least coefficients | the same template, tried where T1 to T3 give no rank: `a₀ = 2^(w+1)`, the `aₖ` in a fixed order of increasing size, the solver asked for counterexamples only (see "The rank search and the solver's models") |
 | T4 lexicographic | SCC slicing over T1 to T3, one rank per node |
 | P2b hint | `generateCandidates` only, with the bound taken from the model's own comparisons |
 
@@ -230,3 +231,74 @@ gaps in the suite. The code was correct in both.
 Polynomial suites (13 of 13) and `check-systolic` (188 of 190, the 2 known legacy
 failures) ran before those last test additions. Neither builds any file that changed
 after that run. No FPGA or hardware path is involved.
+
+## The rank search and the solver's models (2026-11-19, Z3 4.13.3)
+
+**What failed.** The machine's Z3 went from 4.8.12 to 4.13.3 on 2026-11-17, and since then
+the unit test's required table failed on one entry, `t3_swap` at 8 bits:
+`while (x > 0 && y > 0) (x, y) = (y - 1, x)`, `UNKNOWN: no rank for the SCC at L1` where the
+table says `PROVEN_TERMINATING`. The same source, compiler and program with Z3 4.8.12 prove it.
+
+**Which side was wrong.** Not the table: the program terminates (the exhaustive oracle runs it)
+and x + y is a rank. The search was. T3 asks the solver for coefficients and a constant that
+fit the counterexamples seen so far and takes the model it is given, and nothing says which
+model a solver returns. With Z3 4.13.3 the coefficients (1, 1) come back in the first round,
+and the constant comes back each round as the least one the samples allow, -65, then -64,
+then -63: one more counterexample, one more round, and the 24 rounds are spent. With Z3 4.8.12
+the models happened to be others. So the verdict of the tool depended on the solver's choice
+among models, which no proof obligation fixes; it could never be wrong (the checker decides),
+but it was not stable.
+
+**What is changed.** `leastAffine` (`TerminationProposers.cpp`), tried last, after T1, T2 and
+T3 have given no rank for a component: the same template, with nothing of it left to a model.
+
+- The constant is the template's largest, 2^(w+1) for atoms of w bits. No other is better:
+  the rank is `a₀ + L` in w + 6 bits with `|L|` at most 24 * 2^w, so with this constant it
+  stays below 2^(w+6) and can wrap only by being negative, and wherever it is not negative
+  with a smaller constant it is not negative with this one. The descent does not read `a₀`.
+- The coefficients are tried in one order: by the sum of their magnitudes, then atom by
+  atom, each through 1, -1, 2, -2, ..., 0. A candidate that a sample already refutes, in exact
+  integer arithmetic, is passed over without a query; the first one left is put to the solver
+  (the same descent obligation as T3's), and a counterexample is one more sample. That sample
+  refutes the candidate it came from, so every round moves on.
+
+A rank that descends and stays in range as an integer is refuted by no sample, whatever the
+solver answers; it is reached once the candidates before it are gone, each in one round at
+most, many of them in none. That is the guarantee, and its bound: 24 rounds
+(`maxLeastRounds`) and 4096 candidates (`maxLeastCandidates`). What the solver's models still
+decide is how many candidates one counterexample removes, so a rank far down the order can
+still be missed. A result is a candidate like any other: `attempt` and the checker judge it.
+
+T3 itself is not changed, and the new search runs only where no family gave a rank: every
+proof found before is found as before, query for query.
+
+**Measured** (the catalogue at each width, T3 off with `--max-cegis-rounds=0`, then as the
+tool runs):
+
+| Program | Width | Least coefficients alone | As the tool runs |
+| --- | --- | --- | --- |
+| `t3_swap` | 4 | x + y + 32, 38 queries | T3, 50 queries |
+| `t3_swap` | 8 | x + y + 512, 41 | T3 gives none; least coefficients, 137 |
+| `t3_swap` | 32, 64 | x + y + 2^(w+1), 39 and 42 | T3 gives none; least coefficients, 135 and 138 |
+| `t3_two_step` | 8 | 2x + y + 512, 76 | T3, 133 |
+| `t3_low` | 8 | 2x + y + 512, 73 | T3 gives none; least coefficients, 319 |
+| `t3_low` | 64 | 2x + y + 2^65, 72 queries, 3 s | T3 gives none; least coefficients, 342 queries, 29 s |
+
+`t3_two_step` and `t3_low` are new in the catalogue (`gen_loops.py`) and in the unit test's
+table: two branches, (x - 1, y + 1) and (x + 1, y - 3), under `x > 0 && y > 0` and under
+`x + low > 0 && y + low > 0`. No counter descends on both branches, and with `low` the rank is
+negative where the loop still runs, so only the constant keeps it in range.
+
+**Tests.** `term_least.mlir`, every command with T3 off but the last three: the rank found for
+each program, coefficient by coefficient and with its constant, at 8 bits and for `t3_swap`
+at 4 and 64; no rank with both searches off; proved as the tool runs. Four mutants in
+`scf_search_mutation.py` (the search not tried; the constant not the largest; the order
+reversed; refuted candidates put to the solver all the same). `T3 removed` of
+`termination_mutation.py` now takes both searches out: the second would otherwise stand in
+for the first.
+
+**Not changed, and said plainly.** T3 still takes its coefficients and constant from models,
+so whether T3 or the search after it finds a rank still depends on the solver; only the
+verdict no longer does, for ranks within the bound above. No test requires that it is T3
+that succeeds. `c_wrap` and `j_step_wrap` are `UNKNOWN` as before (Left for G2b). Z3 was not
+downgraded, and no version of it is required.

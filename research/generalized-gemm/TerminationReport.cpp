@@ -39,6 +39,14 @@ static cl::opt<bool> printScripts("print-scripts", cl::init(false));
 static cl::opt<unsigned> timeoutMs("timeout-ms", cl::init(10000));
 static cl::opt<unsigned> resourceLimit("rlimit", cl::init(20000000));
 static cl::opt<unsigned> proposerQueries("max-proposer-queries", cl::init(2500));
+static cl::opt<unsigned> cegisRounds(
+    "max-cegis-rounds", cl::init(24),
+    cl::desc("rounds of the affine rank search that takes its coefficients from the solver's "
+             "models (0: that search proposes nothing)"));
+static cl::opt<unsigned> leastRounds(
+    "max-least-rounds", cl::init(24),
+    cl::desc("rounds of the affine rank search by least coefficients (0: that search "
+             "proposes nothing)"));
 static cl::opt<unsigned> checkerQueries("max-checker-queries", cl::init(4096));
 static cl::opt<unsigned> maxPaths("max-paths", cl::init(512));
 static cl::opt<uint64_t> replayFuel("replay-fuel", cl::init(1u << 18));
@@ -109,6 +117,8 @@ int main(int argc, char **argv) {
     options.limits.solver.timeoutMilliseconds = timeoutMs;
     options.limits.solver.resourceLimit = resourceLimit;
     options.limits.maxProposerQueries = proposerQueries;
+    options.limits.maxCegisRounds = cegisRounds;
+    options.limits.maxLeastRounds = leastRounds;
     options.limits.maxCheckerQueries = checkerQueries;
     options.limits.paths.maxPaths = maxPaths;
     options.limits.replayFuel = replayFuel;

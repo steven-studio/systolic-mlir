@@ -221,6 +221,46 @@ out.append(f"""func.func @t3_swap(%a: {T}, %b: {T}) {{
   return
 }}
 """)
+
+def two_steps(name, low):
+    """while (x + low > 0 && y + low > 0) (x, y) = x > y ? (x - 1, y + 1) : (x + 1, y - 3).
+
+    No counter descends on both branches and none descends on one and stands on the other;
+    2x + y descends on both, by 1. With low = 0 it is positive wherever the loop continues.
+    With low > 0 it is not: the loop continues below zero, and no rank over x and y alone
+    stays in range without a constant."""
+    constant = f"  %low = arith.constant {low} : {T}\n" if low else ""
+    head = f"  %xs = arith.addi %x, %low : {T}\n  %ys = arith.addi %y, %low : {T}\n" if low else ""
+    x, y = ("%xs", "%ys") if low else ("%x", "%y")
+    return f"""func.func @{name}(%a: {T}, %b: {T}) {{
+  %c0 = arith.constant 0 : {T}
+  %c1 = arith.constant 1 : {T}
+  %c3 = arith.constant 3 : {T}
+{constant}  cf.br ^h(%a, %b : {T}, {T})
+^h(%x: {T}, %y: {T}):
+{head}  %g = arith.cmpi sgt, {x}, %c0 : {T}
+  %h = arith.cmpi sgt, {y}, %c0 : {T}
+  %both = arith.andi %g, %h : i1
+  cf.cond_br %both, ^b, ^e
+^b:
+  %side = arith.cmpi sgt, %x, %y : {T}
+  cf.cond_br %side, ^l, ^r
+^l:
+  %xl = arith.subi %x, %c1 : {T}
+  %yl = arith.addi %y, %c1 : {T}
+  cf.br ^h(%xl, %yl : {T}, {T})
+^r:
+  %xr = arith.addi %x, %c1 : {T}
+  %yr = arith.subi %y, %c3 : {T}
+  cf.br ^h(%xr, %yr : {T}, {T})
+^e:
+  return
+}}
+"""
+
+
+out.append(two_steps("t3_two_step", 0))
+out.append(two_steps("t3_low", MAX // 3))
 out.append(f"""func.func @f_div(%n: {T}) {{
   %c0 = arith.constant 0 : {T}
   %c1 = arith.constant 1 : {T}

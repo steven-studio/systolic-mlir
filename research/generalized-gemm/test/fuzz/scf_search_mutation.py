@@ -98,6 +98,21 @@ MUTANTS = [
      "    if (out.size() + 2 <= in.limits.maxInvariantCandidates)\n"),
     ("a relation that equals a candidate the limit cut not made again", T,
      "  unique.clear();\n  unique.insert(out.begin(), out.end());\n", "  (void)0;\n"),
+    # The affine rank by least coefficients (term_least.mlir, with the model-driven search off).
+    ("the least coefficients not tried", T,
+     "         tryAll(affineRanks(component, inside)) ||\n         tryAll(leastAffineRanks(component, inside));\n",
+     "         tryAll(affineRanks(component, inside));\n"),
+    ("the least coefficients' constant not the template's largest", T,
+     "  const APInt constant = APInt::getOneBitSet(width, sourceWidth + 1);\n",
+     "  const APInt constant(width, 0);\n"),
+    ("the least coefficients tried from the largest", T,
+     "  for (int norm = 1; norm <= 4 * int(count) &&\n"
+     "                     candidates.size() < in.limits.maxLeastCandidates; ++norm) {\n",
+     "  for (int norm = 4 * int(count); norm >= 1 &&\n"
+     "                     candidates.size() < in.limits.maxLeastCandidates; --norm) {\n"),
+    ("a candidate that a sample refutes asked of the solver all the same", T,
+     "    while (next < candidates.size() && !fits(candidates[next]))\n      ++next;\n",
+     "    (void)fits;\n"),
 ]
 
 EQUIVALENT = [
@@ -120,7 +135,7 @@ CRASH = ("Stack dump", "PLEASE submit a bug report", "Segmentation fault", "core
 TOOLS = ["generalized-gemm-nest-report", "generalized-gemm-synthesis-report", "generalized-gemm-domain-report",
          "generalized-gemm-computation-report", "generalized-gemm-report", "generalized-gemm-termination-report",
          "generalized-gemm-coordinate-report"]
-FILTER = "nest_|synth_|dom_|comp_|term_relations"
+FILTER = "nest_|synth_|dom_|comp_|term_relations|term_least"
 SECONDS = 3600
 
 

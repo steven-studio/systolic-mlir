@@ -111,6 +111,10 @@ struct TerminationLimits {
   unsigned maxCheckerQueries = 4096, maxProposerQueries = 2500;
   unsigned maxInvariantCandidates = 600, maxRankCandidates = 96;
   unsigned maxCegisRounds = 24;
+  // The search of an affine rank by least coefficients (TerminationProposers.cpp,
+  // leastAffine): its rounds, one solver query each at least, and the candidates
+  // it lists.
+  unsigned maxLeastRounds = 24, maxLeastCandidates = 4096;
   uint64_t replayFuel = 1u << 18, replayCells = 1u << 16;
   unsigned maxReplayEntries = 96;
 };

@@ -7,6 +7,7 @@
 #include "llvm/ADT/SmallString.h"
 
 #include <algorithm>
+#include <array>
 #include <functional>
 #include <set>
 
@@ -60,6 +61,14 @@ private:
   std::optional<Term> cegis(llvm::ArrayRef<Term> atoms, bool isSigned,
                             llvm::ArrayRef<unsigned> inside,
                             const std::set<unsigned> &strict);
+  std::vector<Term> affineAtoms(llvm::ArrayRef<unsigned> component,
+                                llvm::ArrayRef<unsigned> inside);
+  std::vector<std::pair<Term, std::string>>
+  leastAffineRanks(llvm::ArrayRef<unsigned> component,
+                   llvm::ArrayRef<unsigned> inside);
+  std::optional<Term> leastAffine(llvm::ArrayRef<Term> atoms, bool isSigned,
+                                  llvm::ArrayRef<unsigned> inside,
+                                  const std::set<unsigned> &strict);
   std::vector<Term> leavingComparisons(llvm::ArrayRef<unsigned> component);
   void rememberParameters(const SmtResponse &response);
 
@@ -607,11 +616,10 @@ std::optional<Term> Proposer::cegis(llvm::ArrayRef<Term> atoms, bool isSigned,
   return std::nullopt;
 }
 
-std::vector<std::pair<Term, std::string>>
-Proposer::affineRanks(llvm::ArrayRef<unsigned> component,
-                      llvm::ArrayRef<unsigned> inside) {
-  std::vector<std::pair<Term, std::string>> out;
-  // What varies in the SCC, then the values it is compared with.
+/// What an affine rank of the SCC is written over: what varies in it, then the
+/// values it is compared with; six at most.
+std::vector<Term> Proposer::affineAtoms(llvm::ArrayRef<unsigned> component,
+                                        llvm::ArrayRef<unsigned> inside) {
   std::vector<Term> atoms;
   auto add = [&](Term t) {
     if (t && t->sort.kind == Sort::BV && !llvm::is_contained(atoms, t) &&
@@ -631,6 +639,14 @@ Proposer::affineRanks(llvm::ArrayRef<unsigned> component,
     for (Term side : comparison->args)
       if (side->op == TermOp::State || side->op == TermOp::Param)
         add(side);
+  return atoms;
+}
+
+std::vector<std::pair<Term, std::string>>
+Proposer::affineRanks(llvm::ArrayRef<unsigned> component,
+                      llvm::ArrayRef<unsigned> inside) {
+  std::vector<std::pair<Term, std::string>> out;
+  std::vector<Term> atoms = affineAtoms(component, inside);
   if (atoms.empty())
     return out;
   for (bool isSigned : {true, false}) {
@@ -641,6 +657,175 @@ Proposer::affineRanks(llvm::ArrayRef<unsigned> component,
       for (unsigned pivot : inside) {
         if (auto rank = cegis(atoms, isSigned, inside, {pivot}))
           out.push_back({*rank, "T3 bounded affine"});
+      }
+  }
+  return out;
+}
+
+/// The template of cegis once more, with nothing of it taken from a model.
+///
+/// cegis asks the solver for coefficients and a constant that fit its samples and
+/// takes the model it is given. Which model that is, is the solver's choice, and
+/// the search stands or falls with it: for `while (x > 0 && y > 0) (x, y) =
+/// (y - 1, x)` the rank is x + y, one solver (Z3 4.8) reaches it, and another
+/// (Z3 4.13) finds the coefficients in its first round and then answers every
+/// round with the least constant its samples allow, one more than the round
+/// before, until the rounds are spent. Here the solver is asked for
+/// counterexamples and for nothing else.
+///
+///   The constant is the largest the template has, 2^(w+1) for atoms of w bits.
+///   No other is better. The rank is c + L(atoms) in w + 6 bits, |L| at most
+///   24 * 2^w (six atoms, coefficients to 4): with this c it stays below
+///   2^(w+6), so it wraps only by being negative, and wherever it is not
+///   negative with a smaller c it is not negative with this one. The descent
+///   does not read c.
+///
+///   The coefficients are tried in one order: by the sum of their magnitudes,
+///   then atom by atom, each through 1, -1, 2, -2, ..., 0. A candidate that a
+///   sample refutes, in exact arithmetic, is passed over; the first one left is
+///   put to the solver, and a counterexample is one more sample. That sample
+///   refutes the candidate it came from (below 2^(w+6) the bit-vector order is
+///   the integers'), so every round moves on.
+///
+/// What comes of it: a rank that descends and stays in range as an integer is
+/// refuted by no sample, whatever the solver answers, so it is reached once the
+/// candidates before it are gone, each in one round at most. A result is one
+/// more candidate for the checks, as cegis's is.
+std::optional<Term> Proposer::leastAffine(llvm::ArrayRef<Term> atoms, bool isSigned,
+                                          llvm::ArrayRef<unsigned> inside,
+                                          const std::set<unsigned> &strict) {
+  unsigned sourceWidth = 0;
+  for (Term atom : atoms)
+    sourceWidth = std::max(sourceWidth, atom->sort.width);
+  const unsigned width = sourceWidth + 6, count = atoms.size();
+  // Sums of the samples, exactly: 24 values of `width` bits and the constant.
+  const unsigned exact = width + 8;
+  const APInt constant = APInt::getOneBitSet(width, sourceWidth + 1);
+  auto wide = [&](Term t) { return extended(terms, t, isSigned, width); };
+
+  // The candidates in their order, the null one left out: it descends nowhere.
+  using Coefficients = std::array<int, 6>;
+  std::vector<Coefficients> candidates;
+  for (int norm = 1; norm <= 4 * int(count) &&
+                     candidates.size() < in.limits.maxLeastCandidates; ++norm) {
+    Coefficients current{};
+    std::function<void(unsigned, int)> place = [&](unsigned at, int left) {
+      if (candidates.size() >= in.limits.maxLeastCandidates)
+        return;
+      if (at == count) {
+        if (left == 0)
+          candidates.push_back(current);
+        return;
+      }
+      // What the atoms after this one can still take.
+      const int after = 4 * int(count - at - 1);
+      for (int magnitude = 1; magnitude <= std::min(4, left); ++magnitude)
+        for (int value : {magnitude, -magnitude})
+          if (left - magnitude <= after) {
+            current[at] = value;
+            place(at + 1, left - magnitude);
+          }
+      current[at] = 0;
+      if (left <= after)
+        place(at + 1, left);
+    };
+    place(0, norm);
+  }
+
+  struct Sample {
+    bool strict;
+    std::vector<APInt> before, after;
+  };
+  std::vector<Sample> samples;
+  auto linear = [&](const Coefficients &a, const std::vector<APInt> &values) {
+    APInt sum(exact, 0);
+    for (unsigned k = 0; k < count; ++k)
+      sum += APInt(exact, a[k], /*isSigned=*/true) * values[k];
+    return sum;
+  };
+  const APInt top = constant.zext(exact), zero(exact, 0), one(exact, 1);
+  auto fits = [&](const Coefficients &a) {
+    for (const Sample &sample : samples) {
+      APInt before = linear(a, sample.before), after = linear(a, sample.after);
+      if ((before - after).slt(sample.strict ? one : zero) ||
+          (top + before).isNegative() || (top + after).isNegative())
+        return false;
+    }
+    return true;
+  };
+
+  size_t next = 0;
+  for (unsigned round = 0; round < in.limits.maxLeastRounds; ++round) {
+    while (next < candidates.size() && !fits(candidates[next]))
+      ++next;
+    if (next == candidates.size())
+      return std::nullopt;
+    const Coefficients &a = candidates[next];
+    Term rank = terms.bv(constant);
+    for (unsigned k = 0; k < count; ++k)
+      if (a[k] != 0)
+        rank = terms.binary(TermOp::Add, rank,
+                            terms.binary(TermOp::Mul,
+                                         terms.bv(APInt(width, a[k], /*isSigned=*/true)),
+                                         wide(atoms[k])));
+    bool refuted = false;
+    for (unsigned id : inside) {
+      const CutPath &path = in.set.paths[id];
+      Aux aux;
+      for (unsigned k = 0; k < count; ++k) {
+        aux.push_back({"u" + std::to_string(k), wide(atoms[k])});
+        aux.push_back({"v" + std::to_string(k),
+                       postTerm(program, path, wide(atoms[k]))});
+      }
+      SmtResponse response = ask(
+          descentViolation(program, in.set, in.scope, path, invariantAt(path.from),
+                           inside, rank, rank, strict.count(id) != 0),
+          aux, /*wantModel=*/true);
+      if (response.answer == SmtAnswer::Unsat)
+        continue;
+      if (response.answer != SmtAnswer::Sat)
+        return std::nullopt;
+      rememberParameters(response);
+      Sample sample{strict.count(id) != 0, {}, {}};
+      for (unsigned k = 0; k < count; ++k) {
+        auto read = [&](const std::string &name) {
+          auto value = response.model.find(name);
+          APInt bits(width, 0);
+          if (value != response.model.end())
+            bits = APInt(width, value->second, 10);
+          return bits.sext(exact);
+        };
+        sample.before.push_back(read("u" + std::to_string(k)));
+        sample.after.push_back(read("v" + std::to_string(k)));
+      }
+      samples.push_back(std::move(sample));
+      refuted = true;
+      break;
+    }
+    if (!refuted)
+      return rank;
+    ++next; // Its own sample refutes it.
+  }
+  return std::nullopt;
+}
+
+/// The candidates of leastAffine, asked for as affineRanks asks cegis: every path
+/// strict, then one path strict at a time; signed, then unsigned.
+std::vector<std::pair<Term, std::string>>
+Proposer::leastAffineRanks(llvm::ArrayRef<unsigned> component,
+                           llvm::ArrayRef<unsigned> inside) {
+  std::vector<std::pair<Term, std::string>> out;
+  std::vector<Term> atoms = affineAtoms(component, inside);
+  if (atoms.empty())
+    return out;
+  for (bool isSigned : {true, false}) {
+    std::set<unsigned> all(inside.begin(), inside.end());
+    if (auto rank = leastAffine(atoms, isSigned, inside, all))
+      out.push_back({*rank, "T3 bounded affine, least coefficients"});
+    if (inside.size() > 1)
+      for (unsigned pivot : inside) {
+        if (auto rank = leastAffine(atoms, isSigned, inside, {pivot}))
+          out.push_back({*rank, "T3 bounded affine, least coefficients"});
       }
   }
   return out;
@@ -726,9 +911,12 @@ bool Proposer::solveComponent(llvm::ArrayRef<unsigned> component,
   for (const RankHint &hint : in.hints)
     if (hint.rank && hint.rank->sort.kind == Sort::BV && !readsMemory(hint.rank))
       hints.push_back({hint.rank, hint.origin});
+  // The least coefficients last, and only when nothing before them gave a rank:
+  // whatever was proved without them is proved as it was, query for query.
   return tryAll(hints) || tryAll(guardDistances(component)) ||
          tryAll(modularDistances(component, inside)) ||
-         tryAll(affineRanks(component, inside));
+         tryAll(affineRanks(component, inside)) ||
+         tryAll(leastAffineRanks(component, inside));
 }
 
 bool Proposer::solve(llvm::ArrayRef<unsigned> current, std::vector<RankLevel> &out) {

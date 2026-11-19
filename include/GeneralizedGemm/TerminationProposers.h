@@ -6,7 +6,9 @@
 // and nothing else that issues a verdict.
 //
 //   Houdini: guess inductive facts, drop what a model falsifies.
-//   T1 guard distance, T2 modular distance, T3 bounded affine by CEGIS.
+//   T1 guard distance, T2 modular distance, T3 bounded affine by CEGIS, then,
+//   where those give no rank, T3 again by least coefficients: the same
+//   template with nothing of it taken from a solver's model.
 //   T4 lexicographic: SCC slicing over those three.
 //
 //===----------------------------------------------------------------------===//
