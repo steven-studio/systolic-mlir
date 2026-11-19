@@ -1,0 +1,17 @@
+import os
+import lit.formats
+config.name = "generalized-gemm"
+config.test_format = lit.formats.ShTest(execute_external=False)
+config.suffixes = [".mlir"]
+config.test_source_root = "@CMAKE_CURRENT_SOURCE_DIR@/test/lit"
+config.test_exec_root = "@CMAKE_CURRENT_BINARY_DIR@/lit"
+config.excludes = ["Inputs"]
+config.substitutions.append(("%report", "@CMAKE_CURRENT_BINARY_DIR@/generalized-gemm-report"))
+config.substitutions.append(("%termreport", "@CMAKE_CURRENT_BINARY_DIR@/generalized-gemm-termination-report"))
+config.substitutions.append(("%coordreport", "@CMAKE_CURRENT_BINARY_DIR@/generalized-gemm-coordinate-report"))
+config.substitutions.append(("%synthreport", "@CMAKE_CURRENT_BINARY_DIR@/generalized-gemm-synthesis-report"))
+config.substitutions.append(("%compreport", "@CMAKE_CURRENT_BINARY_DIR@/generalized-gemm-computation-report"))
+config.substitutions.append(("%domreport", "@CMAKE_CURRENT_BINARY_DIR@/generalized-gemm-domain-report"))
+config.substitutions.append(("%nestreport", "@CMAKE_CURRENT_BINARY_DIR@/generalized-gemm-nest-report"))
+config.substitutions.append(("FileCheck", "@GG_FILECHECK@"))
+config.substitutions.append((" not ", " @GG_NOT@ "))

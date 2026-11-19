@@ -150,7 +150,7 @@ recoverSourceDomain(ValueRange iterationIVs) {
 /// The symbol part must be a sum of products: a floordiv, ceildiv or mod of
 /// symbols (s0 floordiv 2; simplification also makes one of
 /// (4 * d0 + s0) floordiv 4) splits off cleanly but is no run-time offset
-/// the lowering builds (materializeOffset in AffineMatmulToSystolic.cpp),
+/// the lowering builds (materializeOffset in MatmulTileLowering.cpp),
 /// so the access stays UNKNOWN, as a mod/div subscript does
 /// (docs/AFFINE_GEMM_MAPPING.md section 10).
 static FailureOr<AffineMap> separateSymbols(AffineMap map,

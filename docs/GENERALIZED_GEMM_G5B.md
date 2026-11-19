@@ -1,0 +1,1570 @@
+# Generalized GEMM recognition: Phase G5b, beyond one lexicographic order
+
+G5b extends G5a where its one guarded order over one coordinate family is not enough:
+sibling loops, multiplicity that varies over the domain, and events ordered across loop
+regions. This record holds the audit, the design, and the first milestone. It is
+research-only, nothing here is linked into production lowering, and no result authorizes
+one. Earlier records: `docs/GENERALIZED_GEMM_G0_G1.md` to `_G5A.md`.
+
+The SemGuS review of 2026-11-05 decided that the existing grammar and search stay
+(architecture A); no SemGuS code is part of G5b.
+
+## Audit: what G5a cannot say, and why
+
+Each limit below was reproduced with the committed G5a driver at `8aa5447`, and traced to
+the function that imposes it.
+
+| Program | G5a result | Where, and why |
+| --- | --- | --- |
+| `sib_same`: two loops `i`, `j` over the same roots and cells | search Unknown, "no candidate was verified within the limits" | `Enumerator::fillLive` (`FiniteDomain.cpp:271`) keeps as live state only variables defined at every event of the group. `j` is undefined during the first loop, so it is no coordinate; `i` keeps its final value through the second loop, so both second-loop events have the point `[1,0,1,2]` at n = 2. No term over state tells them apart |
+| `sib_counter`: a counter carried through both loops | the same | The second loop's counter is a second block argument, a second state variable, undefined during the first loop |
+| `sib_halves`, `sib_reversed`, `sib_conditional` | the same | The same |
+| `sib_roots`: the second loop reads another operand root | two groups; each group's domain claim Verified; G4a REFUTED each with a witness; Theorem 13 REFUTED | `groupSites` (`FiniteDomain.cpp:36`) groups by the exact root triple. G4a's replay relation is per group, and each group's cells are written by the other, so each group's own relation is false. The refutation is correct for the claim made; the program as a sum of two groups has no claim at all |
+| `growing`: `t in [0, k+1)` with `t` outside the family | Theorem 12 Verified; multiplicity `COUNTED` at points and `UNKNOWN` symbolically | `constantBox` (`DomainChecker.cpp:178`, G5a) admitted a box only when repeat bounds read parameters alone |
+
+Two more facts from the audit:
+
+- With the search's own candidates, `growing` has multiplicity `UNIT`: the search absorbs
+  `t` as a K coordinate. Varying multiplicity arises when the family is given, as G6 will
+  give it.
+- The G5a proposer fitted `t`'s bound as the constant 3 and rescued the box with a
+  piecewise guard of eleven disjuncts, because a constant fit was tried before any bound
+  that moves with an outer level. Correct, verified, and needlessly weak.
+
+So the sibling limit is one of **representation**: a coordinate family is one tuple of
+terms (`CoordinateFamily.axes`), a guarded order is one sequence of levels
+(`GuardedOrder.levels`), and both are evaluated at every event of the group. No grammar
+extension changes that, since no term over the state at a second-loop event can recover
+the first loop's position. The multiplicity limit was one of a **missing closed form**,
+and is the first milestone.
+
+## Design
+
+### Objects
+
+For a group with sites in several regions:
+
+- A **segment** is a set of the group's sites with its own coordinate terms and its own
+  guarded order. Every site is in exactly one segment.
+- A **segmented family** gives, per segment, the tuple of terms for P, I, J, K. A term is
+  evaluated only at the events of its segment, where it is defined.
+- A **segmented order** is a sequence of segments. Its set is the disjoint union
+  S = S₁ ⊔ … ⊔ Sₘ, ordered segment by segment and lexicographically within one.
+- The **extended point** of an event is (segment index, λ_segment).
+
+A program with one region has one segment, and every G5a object is that case.
+
+### Theorem 15 (segmented orbit)
+
+Let the segments be s = 1 … m in that order. Suppose D1 for segment 1 from the entry;
+D2 and D3 within each segment as in Theorem 12; and
+
+- **D4 (hand-over).** On every path from an event of segment s with no successor in S_s
+  to the next event, that event is at a site of segment s+1 and its λ is min S_{s+1}; and
+  on every path from an event of segment s with a successor, the next event is at a site
+  of segment s.
+- **D5 (empty segment).** On every path from the entry, or from the last event of
+  segment s, that reaches the first event of a segment later than s+1 without an event of
+  s+1, S_{s+1} is empty.
+
+Then, for every parameter point in scope and every run that completes, the extended
+points of the events in order are exactly the elements of S in order.
+
+*Proof.* Theorem 12 within each segment; D4 and D5 glue consecutive segments, with an
+empty segment skipped only when its set is empty. ∎
+
+Each of D4 and D5 is a QF_BV query over G3b's walker, with the next event's site known
+from the location it arrives at. A guard at the boundary (`sib_conditional`) is a path
+condition like any other: the second segment's set is empty where the guard is false, and
+D5 demands that.
+
+### Theorem 13 over segments
+
+G4a's replay relation is already per group, over every site of the group in execution
+order, and knows nothing of segments. So Theorem 13 holds as stated with the segmented
+order in place of the guarded order, and the per-cell key becomes (segment index, κ_s):
+a cell written by both loops of `sib_same` has its first loop's contributions before its
+second loop's, which D4 proves.
+
+### Different operand roots
+
+`sib_roots` is not a G5b domain question. The group is the unit of G4a's claim; a claim
+about the sum of two groups needs a **multi-group replay relation** in G4a: replay all
+listed groups' events in execution order, each with its own operands, and demand that
+every other write be disjoint from the union of their cells. That is a change to
+`ComputationChecker`'s public contract (`CheckedComputation` over a set of groups) and is
+listed under the decisions below. Until then each group's claim is refuted, correctly.
+
+### What does not change
+
+- `CheckedFamily`, `CheckedComputation` and `CheckedDomain` keep their constructors
+  private and their bindings; a segmented request is bound like a request.
+- D1 to D3, K1, C1, T1, A1 and the reorder facts keep their statements within a segment.
+- Refuted still needs a concrete point, and every solver unknown, limit or cut walk is
+  Unknown.
+
+### Milestones
+
+| Milestone | Scope | Contract change |
+| --- | --- | --- |
+| **M1 (this record)** | Multiplicity as a box over the logical levels, Theorem 14 | None: a new `DomainMultiplicity` value and a wider μ term |
+| M2 (below) | Segmented families and orders, Theorem 15, in G5a's checker; a segmented proposer | **Yes:** `DomainRequest` gains segments, each with its own `CoordinateFamily`; `CheckedDomain` gains per-segment facts and a shared-cells fact. `CoordinateFamily` itself is unchanged and G3b is **not** restated over segments: a segmented request's logical form stays `Proposed` |
+| M3 (below) | Multi-group replay in G4a for `sib_roots` | **Yes:** `CheckedComputation` over a set of groups, two new entry points and two facts |
+| M4 | G3b over per-segment terms, so that a segmented Theorem 13 can carry a logical tier | **Yes:** G3b's SymbolicValid obligations restated over segments |
+
+M4 is not started.
+
+## Milestone 1: multiplicity as a box over the logical levels
+
+**Theorem 14.** Let the levels be split into logical ones (the family's coordinates) and
+repeat ones. Suppose: (C1) the guard reads no repeat level; (C2) no logical level's
+bounds read a repeat level; (C3) no repeat level's bounds read a repeat level. Then for
+every logical point x of S(v),
+
+    μ(x) = Π over repeat levels r of max(hi_r(v, x) − lo_r(v, x), 0),
+
+each span in its level's signedness, computed at 128 bits when the repeat widths sum
+below 128.
+
+*Proof.* Fix v and x. By C2 and C1, whether (x, r) ∈ S depends on r only through the repeat
+bounds; by C3 each repeat bound is a function of v and x alone. So the repeat tuples of x
+form a product of intervals [lo_r, hi_r), each with hi_r − lo_r members when lo_r < hi_r
+in its signedness, else none. By Theorem 12 the events of x are exactly those tuples. The
+extension to 128 bits is exact because every span is below 2^w and the widths sum below
+128. ∎
+
+When μ reads no level the form is `CONSTANT_BOX`, as in G5a; when it reads logical
+levels it is `LOGICAL_BOX`, and `multiplicity_term` is read at any event of the point.
+The finite route evaluates μ at the first event of each logical point and refuses a
+mismatch as a defect of this derivation, which cannot happen under Theorem 14; the oracle
+recomputes μ at every event of every point from the term and the counts.
+
+Implemented in `boxMultiplicity` (`DomainChecker.cpp`), replacing `constantBox`, with the
+condition C3 relaxed from "reads no level" to "reads no repeat level". The proposer now
+fits a bound as an outer level plus a constant, nearest level first, takes such a bound
+only where it brings the box nearer the events, chooses a level's signedness before its
+direction, and adds repeat levels greedily by how many events each leaves out of order.
+Each of those is a guess the checker judges. One of them is a matter of form: a
+repeat level is tried innermost first, since placed outside a logical level it makes that
+level's bound read it, which Theorem 14 refuses although the set is the same.
+
+### How M1 is checked independently
+
+The G3b search takes a repeat loop as a K coordinate, so no searched candidate has a
+repeat level and the oracle would never see a `LOGICAL_BOX`. The driver therefore takes
+`--family=p:ids;i:ids;j:ids;k:ids`, state ids per axis, which replaces the search by one
+given candidate per group (`DomainAnalysisRequest::family`). It is a proposal like any
+other: the checkers judge it, and nothing in a checker reads it. The oracle runs each spec
+that names repeat loops twice: once to learn which state holds which loop variable from
+the printed tables, then with the other loops as the family. It evaluates the emitted μ
+term itself at the levels of every logical point of L(v), including points whose repeat
+box is empty and so have no event, compares it with its own count of events, and checks that the term plus one
+disagrees somewhere, so the comparison is no tautology. The run fails unless at least 4
+`LOGICAL_BOX`, 1 `CONSTANT_BOX`, 2 refusals and 1 zero-event point were checked.
+
+### What M1 does not do
+
+- A repeat bound that reads another repeat level (`u in [0, t+1)`) stays `COUNTED` at
+  points and `UNKNOWN` symbolically: that set is a simplex, not a box.
+- A guard that reads a repeat level stays as it was.
+- Nothing about sibling loops changes: they are pinned as Unknown by tests, with G4a's
+  computation claim still Verified for them.
+
+## Milestone 2: segmented families and orders
+
+M2 lets one group's sites be split into **segments**, each with its own coordinate terms
+and guarded order, and proves that the events of a run are those of the segments' sets one
+after the other. It is what `sib_same`, `sib_halves`, `sib_conditional` and their kin
+needed: two loops over the same roots, each with a loop variable that is undefined during
+the other loop.
+
+### Objects
+
+```
+struct Segment {                      // DomainModel.h
+  std::vector<unsigned> sites;        // its sites: a block of the group's partition
+  CoordinateFamily family;            // its logical terms, read only at its events
+  GuardedOrder order;                 // levels, bounds, guard over its level variables
+  std::vector<unsigned> cellKey;      // which levels order a cell, within the segment
+  std::array<std::vector<Term>, 3> access;
+};
+struct DomainRequest { ...; std::vector<Segment> segments; };   // nonempty = segmented
+struct SegmentFacts { sites; multiplicity; multiplicityTerm; cellKey; outputInjective; access; };
+```
+
+A request with `segments` nonempty is **segmented**; its own `order`, `cellKey` and
+`access` are unused, and the family passed beside it must be empty, or the checker refuses
+it (`a segmented request carries its own families`). The segments are in execution order,
+and their sites must partition the group exactly: a site in no segment, in two, or outside
+the group is refused. A request with one segment is the G5a request in another coat and
+gets the same answers (tested).
+
+The segments' **event sets** are disjoint by construction: an event belongs to the segment
+of its site. Their **memory** need not be: two segments may write the same cells, and
+whether they do is a fact (`CheckedDomain::sharedCells()`: Proven, no cell of two
+segments over the scope; Refuted, a point and a cell written by two), never a condition.
+The one-contribution fact T1 is judged over the whole group, so a shared cell refutes it.
+
+### Theorem 15 (segmented orbit)
+
+Let a group have segments s = 0, …, m−1 in that order, each with a guarded set S_s(v)
+over its own levels, and let the run at parameter point v complete. The **extended point**
+of an event is (s, λ_s), with s the segment of its site and λ_s its segment's levels read
+at the block entry. The claim: the extended points of the events, in order, are exactly
+S_0(v) ⊎ … ⊎ S_{m−1}(v) in order, segment by segment and lexicographically within one.
+
+Obligations, each a QF_BV query over G3b's walker that must be **unsat**:
+
+- **D1' (first event).** On every path from the entry to the first event, that event is
+  at a site of some segment s, its λ_s is min S_s(v), and S_r(v) is empty for every r < s.
+  On every path from the entry to the exit with no event, every S_s(v) is empty.
+- **D2 (successor, within a segment).** From an event of segment s with a successor in
+  S_s(v), on every path to the next event, that event is at a site of s and its λ_s is the
+  successor. (Theorem 12's D2.)
+- **D3 (last).** From an event of segment s with a successor in S_s(v), no path reaches
+  the exit. (Theorem 12's D3, per segment.)
+- **D4 (hand-over).** From an event of segment s with no successor in S_s(v), on every
+  path to the next event, that event is at a site of a segment s' > s, its λ_{s'} is
+  min S_{s'}(v), and S_r(v) is empty for s < r < s'.
+- **D5 (no return, empty tails).** From an event of segment s, no path reaches an event of
+  a segment r < s. From the last event of segment s (no successor), on every path to the
+  exit, S_r(v) is empty for every r > s.
+
+Every obligation is stated under the premise that the event it starts from is in its
+segment's set (as in Theorem 12, by induction on the events) and under the scope.
+
+*Proof.* By induction on the events of the run. D1' places the first event as the minimum
+of the first nonempty set and shows every earlier set empty. Given that the events so far
+are a prefix of S_0 ⊎ … ⊎ S_s ending at some element of S_s: if that element has a
+successor in S_s, D2 makes the next event that successor and D3 forbids the exit; if it is
+the last of S_s, D4 makes the next event the minimum of the next nonempty set, with the
+sets between empty, and D5 forbids an event of an earlier segment ever again. At the exit
+D5 shows every later set empty, so nothing of S is omitted; and nothing is duplicated
+because each step moves to the strict successor in the segmented order. ∎
+
+**Where each obligation is discharged.** Symbolically, `proveSegmentedOrbit`
+(`GuardedOrbit.cpp`) asks every query of D1', D2, D3, D4 and D5 and returns true only
+when all are unsat; any sat, unknown, limit or cut walk is Unknown with the first failing
+obligation named (`D4 at between segment 0 to segment 2, segment 1 empty: sat`). At
+points, `finiteSegmented` (`DomainChecker.cpp`) re-runs each point keeping the whole state
+at every event (`eventStates`, so a segment's term can read a loop variable the live table
+omitted), evaluates each event's segment terms there, and refutes with the point when the
+events' segments ever decrease, or when any segment's events in order differ from its set
+in order. Both routes then judge the key, C1 and μ within each segment, and T1 and shared
+cells over the group. A proposal that cannot be evaluated at an event (a term reading
+state undefined there) is refused, not guessed; so is an event at a site of no segment,
+which the partition check already excludes.
+
+**Guards at the boundary.** A sibling loop under `scf.if` (`sib_conditional`) is a
+segment whose guard is the branch condition over the parameters: where it is false the
+segment's set is empty, which D4 and D5 demand and the finite route checks. A guard
+read from the program's conditions is still a proposal: the checker evaluates it, nothing
+else.
+
+### Theorem 13 over segments
+
+`checkReduction` makes Theorem 13 for a segmented request exactly as before: G4a's
+computation claim over the group, which knows nothing of segments, together with Theorem
+15 over the scope, with the per-cell order (segment, κ_s). A cell written by both loops of
+`sib_same` has its first loop's contributions before its second loop's, which D5 proves,
+and the integer reorder fact is proven over both. What changes is the logical form: G3b
+judges one family over every event of the group and a segmented request has one per
+segment, so `logicalTier()` is `Proposed` for every segmented request. Theorem 13's
+status and tier are unaffected (`VERIFIED SYMBOLIC` for the sibling cases), and G4a is
+not bypassed: `sib_roots`, two loops over different operand roots, gets two groups, each
+segmented and each with Theorem 15 verified, and G4a refutes each group's computation as
+before.
+
+### The segmented proposer (untrusted)
+
+`proposeSegmentedDomain` reads the events of every sample point with their full state,
+puts two sites in one segment when their events interleave at some point (transitively),
+orders segments by their first site (program order), and fits each segment's order to its
+own events with the G5a fitting (`fitOrder`, now shared): loop-carried block arguments
+that vary within a point are its coordinates, other varying state its repeat candidates,
+state with one value at every event a constant for the guards. Bounds may now be another
+level plus a parameter plus a constant (`sib_counter`'s second loop runs its counter from
+n). With `--segments --family=…` the family names the logical loop variables and the
+rest are repeat levels, as with a flat `--family`; without it every loop variable is a
+coordinate and a repeat loop is Unit over (j, t) rather than a box over j. A segment no
+sample reaches gets an empty box with guard false, which the checker judges against the
+scope. Nothing the proposer does is evidence.
+
+### How M2 is checked independently
+
+The oracle (`domain_oracle.py`) gained **segmented specs**: a list of nests run one after
+the other, each with one MAC site, some under a condition on n, some empty at some points,
+some with a repeat loop. The driver runs them with `--segments` (and again with the
+logical variables named when a nest has repeats), and the oracle recomputes, at every
+point of the scope and with its own interpreter:
+
+- the events' segments never decrease, and each segment's events in order are its set in
+  order (Theorem 15, from the request's own bounds and guards);
+- the key, C1 and μ within each segment (μ at every logical point of the nest, as in M1);
+- T1 over the group, a proven shared-cells fact against the cells two nests write, and a
+  refuted one replayed at its point;
+- Theorem 13 with random fills, folding each cell segment by segment and within a segment
+  by the key;
+- no family beside a segmented request, no G3b tier over segments, no later phase's claim.
+
+The run fails below 8 verified segmented claims with two live segments, 2 empty segments
+at a point, 1 shared-cells proof and 1 refutation, 1 box inside a segment and 1 fold that
+crosses a segment boundary. The mutation harness refuses an anchor that is no longer
+unique (14 of M1's anchors were duplicated by the segmented copies of the checks, and are
+re-anchored with surrounding lines; each makes the same edit at the same place in the
+one-order route, and one, `entry-block site admitted`, also deletes the comment line above
+its check), and gains 35 mutants over `proveSegmentedOrbit`, `finiteSegmented`,
+`symbolicSegmented`, `adoptSegments` and the dispatch, one of them listed equivalent with
+its reason (the segment copy of the defensive box check). `testSegmentGates` gives each
+obligation of Theorem 15 a request that only it refutes (a first segment too long for D4,
+a shifted second segment for D4's first event, a later loop declared an empty earlier
+segment for D5, a nonempty set before the first event and at a no-event exit for D1', a
+nonempty set between a hand-over for D4), asks every obligation through a selective
+solver, and runs the limit, certificate, sample, event-limit, wider-scope, entry-block,
+shared-block and closed-gate refusals of the one-order route on the segmented one. The
+first full mutation run left three survivors and two crashes, each a missing test rather
+than a defect: a level that steps back without skipping (`sib_diag`, D2's increase
+alone), a set of the same size with other elements (the second segment offset by one), a
+scope wider than the enumeration, a set longer than the events (the size mutant now admits
+only that, so it refutes instead of indexing past the end), and a site of no segment
+(now a refusal, not a map error). The CTest oracle run keeps 40 programs and gets 3600 s.
+
+### What M2 verifies, refuses, leaves
+
+**Verified** (unit `segments`, oracle, lit `dom_segments.mlir`): two sibling loops over
+identical roots and cells; disjoint halves; different bounds; the second loop reversed,
+as j ascending or 3 − j descending; a sibling loop under a parameter condition; an empty
+first or second segment inside the scope; three segments with the middle one empty at a
+point; a repeat loop inside a segment as a logical box; a counter carried through SSA
+from the first loop into the second, by the loop variables; one segment for one loop.
+
+**Conservatively refused or refuted**, with the reason named: a family beside a segmented
+request; sites in no, two, or foreign segments; segments swapped; a segment too long, too
+short, or declared in the wrong direction; a level that is not monotone in its loop
+(`sib_shuffle`'s shuffled index); the second segment's guard dropped; one segment for
+two loops; a segment order wrongly ordered by the proposer (`seg_three` before the fix,
+refuted by the finite route and Unknown at D4 symbolically).
+
+**Unsupported, Unknown by design**: a segmented request's logical form (G3b over
+segments, M4); two loops over different operand roots as one claim (M3); the
+SSA-carried counter *as a level* over [n, 2n) is Verified at points and Unknown
+symbolically at D2, because the symbolic route does not infer the invariant p₂ = n + j;
+a segment with at most one event per sample point gets no proposal (`a segment whose
+events no state tells apart`), though a hand-written request for it is verified; sites
+that interleave at a point share a segment and are then judged as G5a would.
+
+**Untested assumptions**: Theorem 15 is stated for runs that complete; its symbolic
+discharge rests on G3b's walker and the solver as D1 to D3 did, and on obliviousness of
+the trace, which `traceIsFixed` checks as before. The proposer's reading of full state at
+each event assumes the reference run is representative, which the checker's own re-run
+confirms or refutes.
+
+**Coverage limits of the tests**: `finiteSegmented` re-runs each point under
+`DomainLimits::events`; a re-run that does not return, or a point whose memory exceeds the
+cell limit there, makes the point incomplete and the tier at most Point, with the reason
+kept. No test sets those limits below the enumeration's own, so that branch is not
+exercised, and the candidate mutant that would admit a cut re-run (it would compare a
+prefix of the events with the set and refute falsely) was left out of the harness rather
+than killed. Five of the ten equivalent mutants rest on an argument from the code's
+structure, not on a named test; their reasons are in `domain_mutation.py`.
+
+## Milestone 3: one computation claim over several groups
+
+M3 lets G4a make one claim about the events of several groups at once. It is what
+`sib_roots` needed: two loops into the same cells with different operand roots are two
+groups, and each group's own claim is refuted, correctly, because the other group's
+stores are foreign writes to its cells. M3 does not weaken that claim. It adds a second,
+separate claim about the union, which must be proved on its own.
+
+### Objects and contract
+
+```
+checkGroupSetFinite(program, enumeration, ArrayRef<unsigned> groups, options)   // Point, ScopeEnumerated
+checkGroupSetSymbolic(program, certificate, ArrayRef<SiteGroup> groups, options, backend)  // Symbolic
+CheckedComputation::groupSites()   // the sites of each listed group, in the listed order
+CheckedComputation::groupOrder()   // SetFact: events in blocks, in the listed order
+CheckedComputation::sharedCells()  // SetFact: two listed groups write one cell
+CheckedComputation::groupPoints()  // per replayed point: events per group, shared cells, order
+SetFact { status Proven|Refuted|Unknown, tier, detail, point }   // ComputationModel.h
+replayGroupSet(program, united, groupOfSite, groupCount, point, limits)   // HerbrandReplay.h
+ComputationLimits::maxUnfolding    // the walk behind the symbolic order fact
+ComputationRequest::groupSets, ComputationResult::sets, driver --groups=all;all-reversed;0,1
+```
+
+A set is refused, and is Unknown, when it is empty, lists more than 64 groups, lists a
+group or a site twice, or lists a group that is not whole (the sites of its roots, no
+more, no fewer, and no site the program does not have). The listed order is used by
+`groupOrder()`, the binding, `groupSites()` and the per-group counts of `groupPoints()`,
+and by nothing else. The union's sites are taken in increasing order, as one group's are,
+and F3 visits the groups by their first site, so the claim, its reason, its records and
+its contracts are the same for every listing. The binding names every listed group in order, so a set's claim never stands in
+for the claim of one group, or of another set; `checkCandidateComputation` compares
+bindings and refuses it. With no set requested, every output of G4a is unchanged.
+
+### Theorem 16 (replay over several groups)
+
+Let G₁ … G_k be distinct whole groups with roots (C_i, A_i, B_i), U the union of their
+sites, v in the scope, and M₀ an initial memory whose run completes. Let E be the run's
+events at sites of U, in execution order, each event e with its own site's roots
+(C_e, A_e, B_e) and indices h(e), f(e), g(e).
+
+    Replay_U:  Mem := M₀, with each prefix constant in place
+               for e in E, in order:
+                 Mem[C_e][h(e)] := Mem[C_e][h(e)] ⊕ₑ ( M₀[A_e][f(e)] ⊗ₑ M₀[B_e][g(e)] )
+
+**Claim B_U.** (1) each operand read of each event is the initial value of its cell;
+(2) each event writes Replay_U's next value; (3) the final value of each cell any event
+of U writes is Replay_U's, so for a cell c
+
+    C_final[c] = foldl ⊕ C_init[c] [ a(e) ⊗ b(e) : e ∈ E, cell(e) = c, in execution order ]
+
+with the contributions of every group that writes c interleaved as they ran; (4) every
+other memory effect is listed in the frame.
+
+**Obligations.** The obligations of Theorem 9 with U in place of the group's sites,
+nothing removed:
+
+| ID | Over the union |
+| --- | --- |
+| P, AL, E0, F2 | As in G4a: the program, the trace, the certificate, every written root against every touched root, returns free of memory |
+| E1, E2, R1, OP1, W1, W2 | For every site of U. E2: each site of U owns its store, and no site outside U shares one |
+| OP2 | No write of the program, of any listed group or none, reaches an operand cell of any site of U. Two-copy and order-free |
+| F1 | No write outside U reaches a cell a store of U writes |
+| F3 | The output and operand roots of **every** listed group are arguments |
+| NV | A point of the scope has a completing run with an event of U |
+
+*Proof.* As for Theorem 9, by induction over the ordered writes of the run. By F1, only
+stores of U write a cell of U. By OP2, no write reaches an operand cell of U before or
+after its read, so with OP1 every operand load returns its M₀ value; this covers a store
+of one listed group to an operand cell of another. By W1 and W2 each event's accumulator
+read is its cell's current value, and that value is Replay_U's by the induction, since
+every earlier write of the cell was a store of U and each such store was one Replay_U
+step (R1, E2). Two groups that write one cell are two kinds of step of one fold, taken in
+execution order; nothing about their cells being apart is needed or assumed. ∎
+
+The finite route is Theorem 11 with the machine running over U: each event's operands
+are compared with initial leaves, each written node with Replay_U's next node, and each
+final cell U wrote with Replay_U's; a foreign constant before a cell's first event of U
+starts its fold, any other foreign write makes the next comparison differ. **Refuted**
+needs a concrete run on which the program and Replay_U differ, found by fills and judged
+again by `replayDifference` over U.
+
+**Not the union of the groups' claims.** Each group's claim is checked as before and is
+not used. The union is its own claim, with its own replay, its own queries and its own
+witness search. (Within G4a's model the per-group obligations of every listed group do
+imply the union's, since each already covers every write of the program; the converse is
+false, which is `sib_roots`. Nothing relies on either direction.)
+
+**Shared cells, read-after-write and write-after-write.** A cell two groups write is one
+fold (write after write, in execution order). An operand cell that a listed group writes
+and another reads is refused: the finite route sees the operand node differ and searches
+a witness, the symbolic route fails OP2 (read after write, and write after read, since
+OP2 is order-free). An operand cell written only after its last read is therefore
+Verified at finite tiers and Unknown symbolically (`reads_first`), as for one group.
+
+### The two facts
+
+Facts, and no condition: the claim holds or fails whatever they say, and a fact's query
+that fails changes the fact alone.
+
+**Order (16b).** `groupOrder()` says whether every event of a listed group comes before
+every event of each later-listed group. Finite: the machine counts each event's listed
+group; at a point whose trace reached the exit, an event of a group after one of a
+later-listed group refutes the fact with that point. The point's reference run completed
+and the trace is one at a point (Theorem 9a), so every completing run there shows it.
+Otherwise the fact is Proven at the claim's tier when the claim is Verified. Symbolic:
+from every arrival at a site of the j-th listed group, every feasible way to the next
+event of U (G3b's walker, pruned by the solver) arrives at a group listed no earlier
+than j; by induction on the events the listed indices never fall. A path the walker
+reports is feasible, so reaching an earlier group fails with no query of its own. A block
+with sites of two listed groups holds two events that the walk takes for one, so it is
+not judged (Unknown); the finite route refutes such an interleaving at the first point
+where one block runs twice.
+
+**Shared cells (16c).** `sharedCells()` says whether two listed groups ever write one
+cell. Finite: Refuted at the first point with such a cell, otherwise Proven at the
+claim's tier. Symbolic: Proven when, for each pair of stores of different groups on one
+root, the two-copy query that they meet is unsat at one parameter point; any other
+answer leaves it Unknown. The symbolic route never refutes a fact.
+
+### What M3 verifies, refuses, leaves
+
+The ten cases of the M3 brief, as `testGroupSets` and the oracle pin them:
+
+| Case | Finite | Symbolic | Order fact | Shared fact |
+| --- | --- | --- | --- | --- |
+| 1. Disjoint cells, one root (`different_cells`) | Verified, scope | Verified | Proven | Proven, both routes |
+| 2. Same cells (`same_cells`) | Verified, scope | Verified | Proven | Refuted with point; symbolic Unknown |
+| 3. Second group reads the first's output (`reads_written`) | **Refuted, witness** | Unknown at OP2 | Unknown | Unknown |
+| 4. The reads first (`reads_first`) | Verified, scope | Unknown at OP2 (order-free) | Proven | Proven |
+| 4. Floats in both orders (`float_ab`, `float_ba`) | Verified, each | Verified, each | Per listing | Refuted; Unknown |
+| 5. Wrong listing (`float_ba` listed ab, `same_cells` backwards) | Verified | Verified | **Refuted** (finite), Unknown (symbolic) | as above |
+| 5. One block, two groups (`interleaved`) | Verified | Verified | Refuted at n = 2; symbolic Unknown | Refuted; Unknown |
+| 6. Empty group (`empty_second`, `never`) | Verified, zero events listed | Verified | Proven | Proven |
+| 6. A set of only the empty group | Unknown, no events | Unknown at NV | Unknown | Unknown |
+| 7. Multiplicity 3 per cell (`repeat_shared`) | Verified | Verified | Proven | Refuted; Unknown |
+| 8. Different operand roots (`same_cells`, `numeric`, `three_groups`) | Verified | Verified | Proven | Refuted; Unknown |
+| 9. A writer left out (`three_groups` minus one) | **Refuted, witness** | Unknown at F1 | Unknown | Refuted; Unknown |
+| 9. A group or site twice, part of a group, no group, 65 groups | Refused (Unknown) | Refused (Unknown) | Unknown, "refused" | Unknown |
+| 9. Listing reversed | Same claim | Same claim | Changes | Same |
+| 10. Solver: OP2 or F1 unknown or sat; limits; no certificate | Unknown | Unknown | Unknown | Unknown |
+| 10. A fact's query unknown, or its pair limit | claim unchanged | claim unchanged | that fact Unknown | that fact Unknown |
+
+The numeric example of the brief runs as written: with C = [0, 0], A = [1, 2], B = [10, 20]
+and a unit factor, the trace is C[0] += 1, C[1] += 2, C[0] += 10, C[1] += 20 and C ends as
+[11, 22]. The union of the two groups is Verified on both routes, each group alone is
+Refuted with a witness, and the concrete run agrees with the union's replay.
+
+**Remaining Unknown, by design.** An operand cell written after its last read (OP2 is
+order-free). A shared-cells fact on the symbolic route when cells are shared, since the
+symbolic route never refutes a fact. The order fact where one block holds sites of two
+groups. Everything G4a leaves Unknown for one group stays Unknown for a set. A union with
+one float site is `ORDERED_FLOAT`, whichever group comes first.
+
+**Not exercised.** A symbolic refutation, which the symbolic route never gives, and a set
+of more than 64 groups past its refusal.
+
+**Not changed.** Theorem 13 and `checkReduction` still take one group, so a segmented
+Theorem 13 over several groups is not claimed: `sib_roots` stays Refuted per group in G5a
+and G5b, and no M2 result uses a set's claim. Connecting Theorem 15 over a union of
+groups to Theorem 16 is the next step, and it changes G5a's public contract.
+
+### How M3 is checked independently
+
+`multigroup_oracle.py` is new and shares no code with the library or with the other
+oracles. It generates sequences of nests over six roots, some reading another nest's
+output, some guarded, empty or repeated, some with foreign stores. It asks the driver for
+every set: all, all backwards, each alone, each leaving one out, a group twice and an
+index that does not exist. It then recomputes from each run's source trace the merged
+replay, the facts per point, and every witness. It checks that the listing changes no
+claim and that a set of one group is that group's claim. It perturbs each verified fold
+with a dropped, duplicated and swapped contribution, to show that the check can see
+them. A run fails below its minimum counts (shared cells, cross-group reads, refuted
+order facts, empty groups, three contributions, missing writers and others). It runs in
+CTest as `generalized-gemm-multigroup-programs`.
+
+### Changes to earlier phases (M3)
+
+- `ComputationChecker.cpp` is refactored so that one implementation serves one group and
+  a union. The group's own claims, bindings and JSON are unchanged, which is checked byte
+  for byte against the M2 binaries over every computation and domain lit RUN line.
+- `groupIsWhole` now refuses a group that names a site id the program does not have. Before,
+  such a hand-made `SiteGroup` passed the check and was read out of bounds later. No
+  enumeration produces one, and no existing output changes.
+- `computation_mutation.py`: an anchor must now occur exactly once. The anchor of `sample
+  called a scope` had been stale since G5a replaced the line it mutated, and is
+  re-anchored to the current line; `frame hides observers` follows the new frame code. 34
+  mutants are added for M3, 142 in all, and the `sets` section and the multi-group oracle join the
+  tests every mutant runs.
+- The G4a unit test gains the `sets` section; no earlier test or expectation changed.
+
+**Found by the first validation run.** The oracle compared the claims of `all` and
+`all-backwards` and found two programs (one in CTest's seed, one in the fresh seed) whose
+symbolic claims were Unknown under both listings but named different failing OP2 queries:
+the union's sites were in the listed order, and so was every obligation. No status or tier
+differed. The union's sites are now in increasing order and F3 visits groups by their
+first site, `two_overlaps` and `fresh_both` pin the reasons, records and contracts across
+listings, the oracle compares obligations, contracts and points as well, and two mutants
+(`union in the listed order`, `F3 in the listed order`) remove each ordering. The whole
+validation was then repeated on the new tree.
+
+## Milestone 4-0: one rule for groups and cells
+
+M4-0 is the groundwork the M4 design review asked for before any set-level claim. It adds
+no claim. G3b, G4a and G5a each kept their own whole-group check, and the copies had
+drifted. The domain checker compared cells by their index alone. G3b promoted a finite
+check with a point removed to the whole scope, and a refuted flat family read as if the
+program had no decomposition. M4a to M4d, G6 and G7 are not started.
+
+### Findings fixed
+
+| | Before | Now |
+| --- | --- | --- |
+| F1 | The G3b and G5a gates did not bound site ids: a hand-made group naming a site past the program passed them and was read out of bounds. Only G4a's gate had the bound (M3). | One gate, `wholeGroup`, for all three. |
+| F2 | G5a keyed output cells by index alone, finite and symbolic. Harmless within one group, which has one output root, and wrong for a set of groups. | A cell is a root and an index. Two roots that may alias are never called apart. |
+| F3 | G3b's finite tier was the whole scope whenever the list was not marked as a sample: a list with a point removed was promoted. | `enumerationRanItsScope`: the scope the enumerator recorded, every listed point inside it, and as many distinct points, with those outside the domain, as it counted. |
+| F4 | A refuted family carried no scope: a flat family failing over sibling loops read like a program with no decomposition. | `CheckedFamily::refutes()`: this family, or every family, or nothing. |
+| F5 | G3b turned G3a's unknown into a refutation. | Unknown stays unknown. No enumerated domain reaches this case. |
+| F6 | G3b's finite route indexed a point's domains by the group with no bound, and applied no gate. G4a's and G5a's finite routes do both. | The same bound, "no such group", and the same gate. |
+| F7 | No single-group gate refused a site listed twice, and every checker walks the list. The set route already refused it. | The gate refuses it, in the set route's words. |
+
+F1 to F5 are the review's findings. F6 and F7 were found while unifying the gates. No
+group that the enumerator makes is affected by any of them: every earlier output is
+byte-identical.
+
+### The gate
+
+`SiteSets.h` is the one definition. A group fails at the first of these, in this order,
+with these words:
+
+| Order | Condition | Words |
+| --- | --- | --- |
+| 1 | marked unsupported | the group's own words |
+| 2 | no output root | `the group has no output in memory` |
+| 3 | no site listed | `the group has no sites` |
+| 4 | an id at or past the program's site count | `the group names a site the program does not have` |
+| 5 | an id listed twice | `a site is listed twice` |
+| 6 | not exactly the direct sites of its root triple | `the group is not the sites of its roots` |
+
+A refused group gets these words from the symbolic routes of G3b, G4a and G5a, after
+their checks of the program itself. Each finite route first says the gate of the
+enumeration is closed, then `no such group` for an index past the groups, then the gate's
+words. Only refusal text changes, never a status: G4a and G5a said "no output in memory"
+for an empty list, and G3b gave an empty reason for a group without an output.
+
+### Cells
+
+| First | Second | Relation |
+| --- | --- | --- |
+| root r, index i | root r, index i | `SAME` |
+| root r, index i | root r, index j ≠ i | `DISTINCT` |
+| root r, one rank or width | root r, another | `MAY_ALIAS`, never `DISTINCT` |
+| root r | root s ≠ r, either a fresh allocation | `DISTINCT`, a proof |
+| root r | root s ≠ r, `roots min and max are separate` authorized | `DISTINCT`, an assumption that G4a records |
+| root r | root s ≠ r, otherwise | `MAY_ALIAS` |
+| a root the program does not have | anything | `MAY_ALIAS` |
+
+Different root ids say nothing by themselves, and the name of an authorization is read
+lower root first, as G4a writes it. `rootSeparation` is the function G4a's separations
+now call. `sameCellFormula` is what the domain checker's symbolic routes ask. For one root
+it is both events happening with equal indices. For roots apart it is false. For roots
+that may alias it is both events happening, so a fact that rests on the cells being
+apart stays unproven. The finite route keys a cell by `cellKey`, which is the root and
+then the index.
+
+### What a refutation refutes
+
+| G3b outcome | `refutes()` |
+| --- | --- |
+| Verified, or Unknown | `NOTHING` |
+| The family is malformed or reads memory, on either route | `THIS_FAMILY` |
+| A coordinate has no value, or is undefined, at an event | `THIS_FAMILY` |
+| G3a refutes the labels at a point, with no `output_read_differs` there | `THIS_FAMILY` |
+| G3a reports `output_read_differs` at the failing point: an update reads a cell other than the one it writes | `EVERY_FAMILY` |
+
+`EVERY_FAMILY` is the one refutation that holds for every coordinate family, since no
+labelling changes which cell an update reads. A program whose flat family fails over
+sibling loops stays open to a segmented claim: on `sib_same`, the flat family is refuted
+for itself only, and G4a's claim, G5a's domain and the segmented Theorem 13 all stand.
+
+### Proof levels
+
+Point, ScopeEnumerated and the symbolic tiers mean what they did. G3b's ScopeEnumerated
+now needs `enumerationRanItsScope` and no stopped point. G4a and G5a keep
+`enumerationCoversScope`, which compares the list with the scope of the claim. A sample,
+a list with a point removed, and a list with a point removed and another repeated are
+Point on all three, in the unit test and in the oracle. Nothing is promoted to a tier
+it did not reach.
+
+### New public surface
+
+`SiteSets.h` (`wholeGroup`, `RootSeparation`, `rootSeparation`, `CellRelation`,
+`rootRelation`, `CellRef`, `relateCells`, `cellKey`, `sameCellFormula`), `Refutes` and
+`CheckedFamily::refutes()`, `DomainEnumeration::scope` and `::scopePoints`,
+`enumerationRanItsScope`, and the driver `generalized-gemm-identity-report`. The public
+interface of `CoordinateFamily` does not change. No earlier driver's output changes.
+
+### How M4-0 is checked independently
+
+- **Unit.** The `identity` section of the domain test: the gate at site 0, at the last
+  site and at the first id past them, for all three checkers and both routes; `C[0]`
+  against `D[0]` with and without the authorization; a fresh root; the formula; the
+  tiers under trimmed, repeated, sampled, moved and closed lists and a point outside the
+  domain; the refutation scope on sibling loops, on C0, on a refused family and on an
+  undefined coordinate.
+- **Oracle.** `identity_oracle.py` shares no code with the library. It writes random
+  programs of sibling nests over four argument roots and sometimes a fresh one, some
+  updates reading another root or a shifted cell, and interprets them itself. It
+  predicts the sites, the groups, every gate refusal with its words, every cell relation,
+  and G3b's verdict on the empty family point by point, with its refutation scope, its
+  failing point and its reason. It checks that a removed point demotes G3b and G4a. With
+  every point run, it checks that G4a's tier agrees with G4a's own report of a point left
+  open: that half is consistency, not prediction. It fails below minimum counts of each
+  outcome, the closed gate among them. It runs in CTest as
+  `generalized-gemm-identity-programs`, and with `--memory-limit-gb 0` against a
+  sanitizer build, whose shadow memory a 4 GiB address-space limit refuses.
+- **Mutation.** The domain harness runs the identity section first and the identity
+  oracle last. It gains 41 mutants of the gate, the cells, the refutation scope and the
+  recorded scope. Five are equivalent, with reasons in `domain_mutation.py`: four
+  call sites of G5a's cells, where one group has one output root, and G3a's unknown, which
+  no enumerated domain reaches. The six G3b and six G4a mutants whose code moved into
+  `SiteSets.cpp` are re-anchored there with the same edit, and one is added for G3b's
+  call of the gate.
+
+### What stays Unknown
+
+- Two argument roots with no authorization may alias. Every fact that needs their cells
+  apart stays Unknown.
+- G3b's symbolic route refutes only a refused family. A failed obligation there stays
+  Unknown, as before.
+- A group refused by the gate is Unknown on every route, whatever its sites compute.
+
+### Not done
+
+Segments that belong to one group (Theorem 18), coordinates validated per segment,
+coverage across segments from Theorem 15, and a set-level verdict kept apart from the
+one-group verdict are M4a to M4d. None is started.
+
+## Milestone 4a: one domain claim over a union of groups
+
+M4a is the first of M4's milestones, and the only one started. It adds one claim: the
+events of several groups, as one segmented domain. M3 already claims their values
+together (G4a over a set); M4a claims their events, their order and their cells. It claims
+no fold over the set (Theorem 17, M4b), no coordinates per segment (Theorem 18, M4c) and
+nothing about whether the segments compose into one GEMM (G6).
+
+### Contract
+
+`DomainChecker.h` gains `checkSetDomainFinite` (groups by their index in an enumeration)
+and `checkSetDomainSymbolic` (the groups themselves), which return a `CheckedSetDomain`.
+It is a class of its own, so no set claim can stand where a one-group claim is expected,
+and its binding (`…|set|…`) is no one-group binding. Its parts:
+
+| Part | Meaning |
+| --- | --- |
+| `status()`, `tier()`, `reason()` | Theorem 15 over the union, at Point or ScopeEnumerated (finite) or Symbolic |
+| `groups()`, `segmentGroups()` | The listed groups by their first site, and the group of each segment |
+| `segments()` | Each segment's key, collision, access and multiplicity facts |
+| `sharedCells()`, `singleContribution()` | Root-aware: Proven, Refuted at a point on one root, or Unknown |
+| `rootPairs()` | Every two output roots of the segments: `DISTINCT` by fresh allocation (a proof) or by name (an assumption), or `MAY_ALIAS` |
+| `points()`, `records()`, `refutation()`, `failingPoint()` | As for one group. `points()` counts cells by root and index: for roots that may alias it counts keys, not memory cells, and no fact rests on it. A refutation is of this request's Theorem 15 at a point, never a statement that no segmentation exists |
+
+### Theorem 15 over a union
+
+The union's sites are the event source. Nothing about events changes: the segments must
+partition the sites, and D1' to D5 are asked of the arrivals at all of them, exactly as M2
+asks them of one group's. Theorem 15 never reads a root, so it holds of a union on the same
+proof. The finite route reads each listed point's run and checks the same statement: the
+union's events never return to an earlier segment, and each segment's events in order are
+its set S_s(v) in order. The one-group routes are now these routes with one group's sites
+and no set, and every one-group output is unchanged byte for byte.
+
+Three checks come before any obligation:
+
+| | Check | Refusal |
+| --- | --- | --- |
+| XS | `uniteGroups`, which G4a's set route now shares: 1 to 64 whole groups, no triple twice, no site twice | the gate's words |
+| XP | The segments partition the union's sites, and each segment's sites belong to one group | `segment s mixes groups`, and M2's partition words with "set" for "group" |
+| CI | Cells of one root compare by index. Cells of two roots compare only through their relation | none: the facts that need them apart stay Unknown |
+
+On the symbolic route a pair of events on two roots never reaches a query: apart, they
+share no cell; may alias, the facts stay open. The finite route keys cells by root and
+index, which separates two roots only when they are apart, so the same rule leaves its
+facts open for roots that may alias. A shared cell on one root is refuted at a point on
+either kind of union, since it needs no separation.
+
+### The seven obligations of the brief
+
+| Obligation | Where it is checked |
+| --- | --- |
+| 1. Site-set validity | XS, and XP for the segments |
+| 2. Exact event coverage | Theorem 15: each segment's events are exactly its set, the segments cover the union's sites, and each point's event count is the union's |
+| 3. Segmented partition | XP: every site in exactly one segment, every segment in one group |
+| 4. Order preservation | Theorem 15: D2 and D3 within a segment, D4 and D5 between segments, never back to an earlier one |
+| 5. Root-aware cell identity | CI |
+| 6. Scope soundness | ScopeEnumerated only with every point of the claim's scope (`enumerationCoversScope`) and no stopped point; Symbolic only with every obligation unsat |
+| 7. Proof composition | Verified only on the full path of one route; a fact never raises the claim, and the finite and symbolic claims are never joined |
+
+### The brief's two cases
+
+Case A is `sib_roots`: two groups, C[i] += A[i]·B[i] and C[i] += A[i]·D[i]. Over n = 2 the
+union has exactly four events, two per group in program order. Both routes verify the
+union. The finite route refutes "no cell of two segments" at a point, and the symbolic
+route leaves it Unknown, as it leaves every fact it cannot prove: the events are disjoint
+and the cells are not.
+
+Case B writes C in the first group and D in the second. With `roots 2 and 3 are separate`
+authorized, no cell is common on either route, and no query is asked for it. With no name,
+or with the reversed one, both facts are Unknown, saying the two roots may alias, while the
+claim about events still stands. A fresh allocation in place of D is apart with no name, as
+a proof.
+
+### What stays Unknown or is refused
+
+- Two sites of the union in one block, of one group or two: the symbolic route has no order
+  for them. The finite route refutes an interleaving where a run shows one.
+- Cells of two roots that may alias, for every fact that needs them apart.
+- A set that is not whole groups, a segment that mixes groups, a flat request over a set,
+  and everything a one-group segmented claim leaves Unknown.
+- The fold over the union (M4b), per-segment coordinates (M4c), the candidate verdict and a
+  proposer over unions (M4d), and G6 and G7.
+
+### How M4a is checked independently
+
+- **Unit.** The `setdomain` section of the domain test runs both cases, possibly aliasing
+  and fresh roots, interleaving, the segments backwards, a set that misses events and one
+  with points that have none, every refusal, empty segments and groups, a sample and a
+  trimmed list, every obligation answered sat and unknown, both limits, listing in either
+  order, and a set of one group against that group's own claim.
+- **Oracle.** `setdomain_oracle.py` shares no code with the library. It writes programs of
+  nests over several root triples and interprets them itself. For each union and each
+  group alone, with every name authorized and with none, it checks the partition, Theorem
+  15 at each listed point (finite) or every point (symbolic), each point's event count,
+  every refutation's point, the root pairs, and the cell facts against cells of one root.
+  It checks that the listing changes nothing, that a set of one group is the group's own
+  claim, and that interleaved groups are never verified. It runs in CTest as
+  `generalized-gemm-setdomain-programs`.
+- **Driver.** `generalized-gemm-domain-report --groups=…` asks for sets, with `all` and
+  `all-reversed`, and prints `group_sets` only then. The request for a set joins each
+  group's own segmented proposal in program order: an untrusted proposal for the checker,
+  not the proposer over unions, which is M4d's.
+
+### Changes to earlier phases (M4a)
+
+- `SiteSets.h` gains `uniteGroups`, and G4a's set route calls it: the same checks, in the
+  same order, in the same words. M3's results are unchanged, and the six G4a mutants of
+  that code are re-anchored on it with the same edits.
+- The domain checker's segmented routes run over a list of sites. One-group claims, their
+  bindings and their JSON are unchanged.
+- The domain test gains the `setdomain` section. The domain harness runs it second, and the
+  set oracle last; it gains 16 mutants. One M4-0 equivalence, `domain segment cells by index
+  only`, is no longer equivalent, since a union holds two roots, and is run as a mutant.
+
+**Found on the way, not changed.** The untrusted flat proposer aborts a debug build on some
+programs: `conditionAtoms` builds a one-bit constant from the value 2. It is reached on the
+default path of the domain driver, with no `--segments`, for `sib_roots` at width 16 and
+scope 1 to 3, and on M4-0 alike. No claim depends on it, since a proposal is judged anyway,
+and the set route uses the segmented proposer.
+
+## Milestone 4b-1: Theorem 17 over a set of groups
+
+M4b-1 joins two claims the composer makes itself, M3's computation claim over a set
+(Theorem 16) and M4a's domain claim over the same set (Theorem 15 over the union), into
+Theorem 17: for every cell c = (root, index), with every two output roots of the segments
+apart, and every initial memory whose run completes,
+
+    C_final[c] = foldl ⊕ C_init[c] [ A_s[f_s(λ)] ⊗ B_s[g_s(λ)] :
+                 s = 1 … m in order, λ ∈ S_s(v), C_s = C, h_s(λ) = x, in κ_s order ]
+
+each step the exact operation of its site. The order is Theorem 15's: segment by segment,
+and within a segment in λ order, which K1 makes κ order. For floats that order is the
+claim, and nothing in this milestone reorders a contribution. It claims no fold over
+logical points (Theorem 18, M4c), no reorder beyond the trivial fact (M4b-2), and nothing
+about one GEMM (G6).
+
+### Contract
+
+`checkSetReduction(program, certificate, enumeration, groups, segmented request, options,
+backend)` returns a `SetReductionVerdict`, a class of its own with no public constructor for
+a claim. It carries the four component claims (`computationFinite/Symbolic()` as M3 set
+claims, `domainFinite/Symbolic()` as M4a set claims), `status()`, `tier()`, `points()`,
+`everyRun()`, `refutedBy()`, `witness()`, `failingPoint()`, `fold()`, `logicalTier()`
+(Proposed), `groups()`, `binding()` (`reduction|` and the set binding) and the reorder
+facts. `joinSetReduction` is the join itself, public so that tests can hand it claims:
+it accepts only claims about this program, these groups, this scope, these names and, for
+the domain, this request, and refuses anything else in words. `groupSetBinding` in
+`ComputationChecker.h` exposes M3's set binding for that comparison; it makes no claim.
+
+### Obligations
+
+| ID | Obligation | On failure |
+| --- | --- | --- |
+| B | A claim that says anything carries the binding recomputed here for its kind, and the listed groups (M3: `groupSites()`; M4a: `groups()`). The claims' bindings differ in form, M3's in listed order and M4a's canonical, so each is compared with its own recomputation | Unknown, "… is a claim about something else" |
+| VR | A usable Refuted claim refutes: the computation's with its witness (`refutedBy = Computation`, program-level), else the domain's at its point (`refutedBy = Domain`, this request only) | Refuted |
+| RA | Every `rootPairs()` entry of the domain claim is `DISTINCT` | Unknown, naming the pair |
+| TT | Symbolic only when both symbolic claims are Verified and the order is exact; finite at the points both finite claims list with events; ScopeEnumerated only when both are | the lower tier, or Unknown |
+| EC | At every shared finite point the computation's event count equals the domain's | Unknown, "a defect" |
+| OC | Where the segments respect the listing, M3's listed-order fact is not Refuted at a point the domain verified | Unknown, "a defect" |
+| facts | `trivial` from the domain claim (root-aware, so Unknown for roots that may alias); `integer` and `float` only as `trivial` implies them | Unknown |
+
+An Unknown component is not looked at: the verdict rests on the others or is Unknown. A
+Refuted claim of something else refutes nothing. The listed-order fact is never the
+order's source. A finite verdict never becomes Symbolic.
+
+### The brief's cases
+
+| Case | Program | Verdict |
+| --- | --- | --- |
+| 1. Two groups, one cell | `sib_roots` | Verified Symbolic; modular fold; `trivial` Refuted at a point; no reorder claimed in M4b-1 (M4b-2a below proves the `integer` fact here); each group alone Refuted by M3 and unused |
+| 2, 3. Different cells, roots apart | `case_b` authorized; `case_b_fresh` with no name | Verified Symbolic; `trivial` Proven; `integer` Proven by it |
+| 4. Roots that may alias | `case_b` with no name | Unknown, "roots 2 and 3 may alias" |
+| 5. Empty segment, empty group | `set_empty_second`, `set_never` | Verified Symbolic |
+| 6. Multiplicity 2 | `set_repeat` | Verified Symbolic; `trivial` Refuted; the segment's key Proven |
+| 7. Events left out | a segment's set short of an event; a writer left out (`set_third` minus one) | Refuted by the Domain at a point; Refuted by the Computation with a witness |
+| 8. Wrong order across segments | `sib_roots` backwards; `set_interleaved` | Refuted by the Domain at a point |
+| 9. Float order | `set_float`: (1e16 ⊕ 1) ⊕ (−1e16) = 0 in segment order, 1 in the other | Verified Symbolic, `fold` OrderedFloat, `trivial` Refuted, `float` Unknown; the concrete run gives 0 |
+| 10. Mismatches | another scope, another request, another site set, another program, a refutation of something else | Unknown, "a claim about something else"; a group twice, a flat request, an index past the groups: Unknown |
+
+### How M4b-1 is checked independently
+
+- **Unit.** The `setreduction` section: the cases above, TT with each symbolic claim lost
+  (the domain's by a solver answer, the computation's by its query limit), a trimmed list and
+  an enumeration of another scope at Point, the listing, a set of one group against
+  `checkReduction` on the same request, and `set_reads`, where each group alone is Verified
+  and the union is Refuted.
+- **Oracle.** `setreduction_oracle.py` shares no code with the library. Its programs mix
+  integer and double nests over several triples, some reading another nest's output, some
+  interleaved, some with a repeat loop. For every union and every group alone, with the
+  listing in both orders, it recomputes the verdict's tier from the components' and, where
+  Verified, folds each cell in the request's order, segment by segment and within a segment
+  in the printed order's λ order, with the initial operands and the exact operation, against
+  the cells the union's events write in the program's final memory, on a designed memory
+  (operands 1, outputs 2^53 and −2^53, where the two orders give 0 and 1) and on random
+  ones; it swaps two segments' contributions to one cell and requires the double fold to
+  change on some program and the integer fold never; it replays every refutation over the
+  union's events; and it compares a set of one group with that group's own Theorem 13. A
+  cell of the same root that only another group writes is outside the claim, as Theorem 16
+  states it for the cells the union writes. It runs in CTest as
+  `generalized-gemm-setreduction-programs`.
+- **Mutation.** The domain harness runs the new section third and the oracle last, and gains
+  17 mutants of the composer: refutations dropped or misattributed, the witness dropped,
+  Symbolic from finite or without a component, the exact order not needed, the alias gate
+  dropped, either binding unchecked, the computation from the first group alone, the integer
+  fact without `trivial`, the float fact from the integer rule, the whole scope from one
+  claim, EC and OC dropped. Four are equivalent with reasons: EC and OC detect defects no
+  genuine pair of claims shows; both finite claims demote together; and a symbolic set-domain
+  claim is Verified only on the path that sets the exact order, so the order conjunct is
+  implied, as `T13 without exact order` is for one group. That last one survived the frozen
+  run and was declared with its reason afterwards.
+
+### What stays Unknown
+
+Roots that may alias (RA); two sites of the union in one block on the symbolic route; the
+integer and float reorder facts beyond `trivial` (the integer fact: M4b-2a, next; the float
+fact: M4b-2b); the fold over logical points (M4c); whether the segments compose into one
+GEMM or their order may change (G6); everything M3 and M4a leave Unknown.
+
+## M4b-2a: the integer reorder fact over a set (2026-11-12)
+
+Theorem 13's integer fact, read over the union of the listed groups. For a Verified Theorem
+17 verdict over groups G_1..G_m with union U of their sites and output roots R, pairwise apart
+(RA), at tier τ, Theorem 16 gives every cell c = (root, index) its fold in execution order,
+
+    C_final[c] = ((z_c ⊕ p_1) ⊕ p_2) … ⊕ p_k
+
+with p_i = A[f](μ) ⊗ B[g](μ) the product of event e_i's operands in the initial memory and
+z_c the cell's initial value or prefix constant. The integer fact says: for every point of τ,
+every initial memory whose run completes, every cell and every permutation π of its events,
+each event keeping its own operation, the fold in π's order is the fold in execution order,
+the completing runs are the same runs, and no effect outside U observes a partial sum. It
+is a fact about the model, never a licence: the verdict's order stays Theorem 15's, and the
+verdict's status, tier, points, binding, `fold()`, `everyRun()` and `refutedBy()` are
+final before any fact is computed and are never read back from one.
+
+**The rule (IR-1 to IR-5).** The fact is Proven exactly when: IR-1, the set claim the verdict's
+tier came from is Verified with `fold() == ModularInteger` (one `addf` site makes the union
+`OrderedFloat`, `foldOf`); IR-2, no reduction add of U carries `nsw` or `nuw` (the set claim's
+`contracts()` cover every site of U); IR-3, no residual effect reads a root of R (the set
+claim's `frame()`, which `frameOf` marks for every listed output root); IR-4, no side
+condition loads from a root of R or depends on state that holds a value from memory
+(`memoryIndependentState`); IR-5, the same for every guard. Under them ⊕ is addition in
+Z/2^w, a commutative monoid, so every permutation gives z_c + Σ p_i; the products rest on
+the set claim's operand separation and not on any partial sum; and no stop, guard or other
+effect can tell one order from another, so the completing runs are the same. The argument
+rests on Theorem 16 and the algebra, not on Theorem 15, which is why the fact can hold where
+the order is still the claim. IR-5 is a defence: a guard that reads memory closes the
+obliviousness gate before any claim is made.
+
+**Refuted** only by a witness: a parameter point of the verdict and an initial memory at
+which the program completes and reversing one cell's contributions overflows a flagged
+addition (`reversalDiffers`, the one judge, shared with the tests). The search runs the
+fixed fill sequence of Theorem 13 at the verdict's own points (the listed ones of a finite
+verdict; the enumerated points where a listed group has a domain for a symbolic one), with
+the set's own replay (`replayGroupSet`) for the prefix constants, and judges the union's
+events on every listed root. A memory at which no difference shows is no evidence. With
+`nuw` no reversal can overflow (unsigned partial sums only grow), so the fact is Unknown by
+the contract, never Refuted. Unknown otherwise, with the first failing condition in words.
+
+**What the fact does not say.** It fixes the products: every p_i is the product of the
+initial operands, as Theorem 16 states. A listed group may read a root another listed group
+writes, when every such read precedes the writes (OP2 over the union); moving that group's
+events past those writes would change its operands, which is no permutation of any cell's
+contributions and nothing here licenses. A transformation that reorders nests (G6, G7) must
+keep every operand read before the writes of its root on its own account. The oracle's
+other-order comparison is therefore made only for unions in which no nest reads a root
+another nest of the union writes; the first frozen run of 2026-11-12 found the comparison
+wrongly applied to such a union (`r56`, seed 20261116: a third nest writing `d`, which the
+second reads), the oracle was corrected, and the whole run was repeated. The second run was
+stopped as well, after its units and three oracles had passed: the `set_nsw` unit case
+accepted an Unknown fact beside the Refuted one, which would have let a witness search over
+the first group alone survive; the case now requires the refutation, whose fill sequence is
+fixed, and the whole run was repeated once more. The third run reached CTest, where the
+oracle's own 30-program suite failed on `r17` (seed 1): a `reads_output` program whose
+reading nest is guarded by `1 < n`, so that at n = 1 the union has no cross read and the
+verdict, at that point alone (tier Point), is right; the oracle's blanket rule "a union of
+that shape is never verified" was replaced by the exact check it stood for, that at no
+verified point does an event of the union read a cell an earlier event of the union wrote,
+and the run was repeated a third time. Three repeats, each for a wrong expectation of the
+oracle, none for the checker.
+
+**Tier.** A Proven fact holds at the verdict's tier (`claimTier`): Symbolic over the scope,
+Point or ScopeEnumerated at the listed points, never above the verdict. `trivial` keeps its
+precedence: where it is Proven the integer fact is it, as for one group.
+
+**Floats.** Unchanged: Proven only by `trivial`, else Unknown (M4b-2b). No algebraic rule
+is admitted for floats, not even for two contributions ((z ⊕ p_1) ⊕ p_2 against (z ⊕ p_2) ⊕
+p_1 is a reassociation), and `reassoc` or any fast-math flag is no licence: the model
+evaluates the strict refinement, and a claim about other associations would be another
+claim. The detail string of an open float fact still names M4b-2 as the milestone that
+generalizes it; that milestone is M4b-2b.
+
+### Contract
+
+`ReductionSemantics.h` gains the union forms, and the one-group functions become them over
+one group, byte for byte: `integerReorderConditionsOver(program, outputs, computation, why)`
+reads every root of `outputs` where one group's root was read; `unitedSiteGroup(program,
+listed, groupOfSite, why)` is the union through the gate every set claim shares
+(`uniteGroups`); `reorderWitnessOver(program, listed, parameters, fills, maxCells)` replays
+the set and judges the reversal over the union. `joinSetReduction` computes the fact after
+the verdict: claim not Verified → Unknown; `trivial` Proven → it; `OrderedFloat` → Unknown
+("not an integer fold, or no claim"); else the rule with the computation claim the tier came
+from, Proven at the verdict's tier, or the witness at the verdict's points, or Unknown with
+the reason. The single-group API and `checkReduction` are unchanged in behaviour: every
+one-group output is byte-identical.
+
+### Obligations
+
+| ID | Obligation | On failure |
+| --- | --- | --- |
+| IR-1 | the set claim used is Verified with a modular fold | Unknown |
+| IR-2 | no `nsw`/`nuw` on any add of U | Unknown; Refuted with a witness when a reversal overflows |
+| IR-3 | no residual read of any root of R | Unknown |
+| IR-4 | no stop loads from a root of R or memory-derived state | Unknown |
+| IR-5 | no guard does | Unknown (a defence) |
+| NB-1 | facts are computed from the final verdict and never read back into it; a refuted Theorem 15 order is never rescued by the algebra | mutants `set refuted fact refutes the verdict`, `set wrapping algebra rescues a refuted order` |
+| NB-2 | a Proven fact only on a Verified verdict, at its tier | mutants `set integer fact on an unverified claim`, `… tier above the verdict` |
+| NB-3 | every listed root, every union site | mutants `… conditions over the first root`, `integer stop loads first root only`, `set witness over the first group`, `set witness judges the first group` |
+
+### The brief's cases
+
+| Case | Program | Verdict and fact |
+| --- | --- | --- |
+| A. 8-bit modular addition | `set_i8`: C[0] = 250, +10 then +20 | Verified Symbolic; `integer` Proven Symbolic by the rule; the run ends at 24, (250 + 20) + 10 is 24, the judge finds no reversal that differs; `sib_roots` at 32 bits likewise (−10, +10, +20 → 20) |
+| B. Distinct cells | `set_cells` (C[i] and C[i + 4]), `case_b` (C and D) | `trivial` Proven, `integer` by it; the run shows the cells apart (11 and 27) |
+| C. Roots that may alias | `case_b`, `set_i8` without names | Unknown verdict, every fact Unknown |
+| D. Flags | `set_nsw` | Verified (runs that complete); `integer` Refuted by the fixed fill sequence with a replayable witness, and a hand-built one (C[0] = INT_MAX, contributions −1 then +1) judged again; `set_nuw`: Unknown, no reversal can overflow |
+| E. Wrong listings | `sib_roots` backwards, an event missing, a group twice, `set_third` minus a writer, `set_interleaved` | as M4b-1 says; every fact Unknown |
+| Each condition alone | `set_observer`, `set_stop_second` (the stop on the second root; the first two groups alone Proven), `set_carried_stop` (R3 over a set), `set_mixed` (a float group; the integer groups alone Proven), `set_mixed_flags` (no refutation of a fold of two operations) | Unknown, each with its reason |
+| Tiers and limits | the domain's symbolic claim lost; a trimmed enumeration; a solver limit of zero (both symbolic claims Unknown, the finite tier stands) | Proven at ScopeEnumerated, Point, ScopeEnumerated |
+| Bindings and scopes | another scope, another site set, the computation's symbolic claim lost | Unknown; Unknown; Proven at the finite tier |
+| One group | `sib_same` as a set of one against `checkReduction` | status, tier and detail of every fact equal |
+
+### How M4b-2a is checked independently
+
+- **Unit.** The `setreorder` section (118 checks: the cases above, the two guard programs
+  that close the gate, and the two verdicts the claims do not meet at any tier, which carry
+  no fact), and the two M4b-1 assertions that pinned the integer fact at Unknown, now Proven
+  (case A) and equal to Theorem 13's (one group).
+- **Oracle.** `setreduction_oracle.py` gains three knobs on integer programs, by index:
+  `nsw` on every add, an observer (a load of the first nest's output root between the nests,
+  stored to a root of its own), a stop on the second nest's accumulate load (never taken).
+  It reads the rule off the program it printed: `integer` Proven by the rule only on a plain
+  32-bit union, at the verdict's tier; then the union's program with its nests in the other
+  order (only where no nest of the union reads a root another nest of it writes), and with a
+  repeat loop run backwards, ends with the same bits on every written cell on designed and
+  random memories, and every permutation of a cell's contributions folds to the same value;
+  a plain 32-bit union with two contributions to a cell is never left Unknown; at no
+  verified point does an event of the union read a cell an earlier event of the union wrote
+  (the exact form of M4b-1's "a cross-group read is never verified");
+  a knob never lets the rule prove. Every integer refutation is replayed: the witness run
+  completes here, and the reversed fold of some cell overflows while the forward fold does
+  not. The interpreter stops on a flagged overflow, and such fills are outside the claim.
+  A set of one group has Theorem 13's facts, status and tier.
+- **Mutation.** The domain harness runs `setreorder` fourth and gains 12 mutants: the
+  conditions skipped, on an unverified claim, the fold ignored, the tier above the verdict,
+  the first root only (twice), the first group only (twice), the guard check dropped, the
+  witness memory dropped, a refuted fact refuting the verdict, the algebra rescuing a refuted
+  order; the two Theorem 13 stop mutants and the two M4b-1 fact mutants are re-aimed at the
+  new text. `integer guard loads ignored` is declared equivalent before the run, with its
+  evidence: a guard that reads an output root, directly or through state, closes the
+  obliviousness gate (`set_guard`, `set_guard_state`), so no claim reaches IR-5.
+- **Byte-identity.** Against the M4b-1 commit: every one-group output, and every `--groups`
+  output with `reduction.reorder.integer` removed; every change of that key listed, each
+  Unknown → Proven or Unknown → Refuted.
+
+### What stays Unknown
+
+The float fact beyond `trivial` (M4b-2b); `nuw` adds (no witness can exist, no rule is
+admitted); mixed unions (one `addf` site, or flags that differ between the groups: the judge
+refuses a fold of two operations); any fact on a verdict that is not Verified; everything
+M3, M4a and M4b-1 leave Unknown.
+
+## M4b-2b-1: the float reorder fact over a set, refuted by a witness (2026-11-14)
+
+Theorem 13's float fact, over the union of the listed groups, with the same two sides it has
+for one group: **Proven by `trivial` alone**, and **Refuted by a replayed witness**. Nothing else.
+For a cell with contributions p_1..p_k and start z, every reordering with k ≥ 2 is a
+reassociation of the left-nested fold ((z ⊕ p_π(1)) ⊕ p_π(2)) …, and IEEE-754 addition is not
+associative: (1e16 ⊕ 1) ⊕ −1e16 = 0 while (1e16 ⊕ −1e16) ⊕ 1 = 1. Swapping two contributions
+is not commutation (which would be p ⊕ z = z ⊕ p, the same sum); it is the associativity
+question with z as the third operand. No structural condition on the program constrains the
+values the operands take, so no rule proves a float fold reorderable, and none is admitted:
+not for two contributions, not for `reassoc`, `contract`, `arcp` or `afn` (the model evaluates
+the strict refinement and records that it did; a flag is no licence).
+
+**The model's arithmetic**, which the witness is judged in: binary32 at 32 bits, binary64
+otherwise (`evalFloatBinary`, `APFloat`), round to nearest even only (`roundingmode` is
+refused at import), exact denormals; a NaN result is an `Underspecified` stop, `nsz` makes a
+zero result a stop, `nnan`/`ninf` make NaN or Inf operands and results poison. Floating-point
+status flags are not modelled: the facts speak of values.
+
+**Refuted** by a witness: a point of the verdict and an initial memory at which the program
+completes and reversing one cell's contributions, each the product of the initial operands,
+gives different bits, or gives NaN, so that run would stop. The search is M4b-2a's
+(`reorderWitnessOver`: the set's own replay for the prefix constants, Theorem 13's fixed fill
+sequence, `reversalDiffers` over the union's events on every listed root); the judge now names a
+NaN reversal. A memory at which no difference shows is no evidence: Unknown, with what the
+search found. The verdict is untouched by the fact.
+
+| Memory (binary64 unless said; C[0] = z, A·B = p_1, A·D = p_2) | program order | reversed |
+| --- | --- | --- |
+| z = 1e16, p_1 = 1, p_2 = −1e16 | (1e16 ⊕ 1) ⊕ −1e16 = **0** | **1** |
+| z = 1e16, p_1 = −1e16, p_2 = 1 | (1e16 ⊕ −1e16) ⊕ 1 = **1** | **0** |
+| binary32: z = 2^24, p_1 = 1, p_2 = −2^24 | **0** (2^24 + 1 rounds to 2^24) | **1** |
+| binary32: z = 2^24, p_1 = −2^24, p_2 = 1 | **1** | **0** |
+| z = max, p_1 = max, p_2 = −max | (max ⊕ max) ⊕ −max = **+∞**, completes | **max** |
+| z = 1e308, p_1 = −∞ (B = −∞), p_2 = 1e308 | (1e308 ⊕ −∞) ⊕ 1e308 = **−∞**, completes | **NaN**: that run would stop |
+| z = ±0, p_1 = p_2 = −0 (A = −1, B = D = 0) | +0 from +0, −0 from −0 | the same: the sign of a zero sum under round to nearest even does not depend on the order; no witness |
+| the search's own, `set_float` at n = 1: z = −1, p_1 = −0.001, p_2 = 0.001 | −0.9999999999999999 | −1 |
+
+### Contract
+
+`joinSetReduction` (`DomainChecker.cpp`): the witness search of M4b-2a is one lambda for both
+folds; for an `OrderedFloat` verdict without `trivial` the float fact is its result, Refuted
+with the witness or Unknown with the search's detail. The integer branch is unchanged, and so is
+`checkReduction`: a set of one group has Theorem 13's float fact. `reversalDiffers` says
+"gives NaN, so that run would stop" where the reversed fold is NaN (the one judge, one wording;
+no present test or RUN line had a NaN reversal, so no one-group output changes).
+
+### Obligations
+
+| ID | Obligation | On failure |
+| --- | --- | --- |
+| FL-1 | Proven only by `trivial` (no rule, no flag, no "two contributions commute") | mutant `set float proven without a witness`; oracle F-2 |
+| FL-2 | Refuted only with a witness the judge confirms: the program completes, the reversed fold differs in bits or is NaN | unit replays (`runConcrete` + `reversalDiffers` over the union); oracle F-1 with its own binary64 and binary32 arithmetic and the NaN stop |
+| FL-3 | the witness is a finite statement: one point, one memory; nothing is concluded beyond it (Unknown stays Unknown without one) | `witnessFills = 0` → Unknown; `set_mixed` → Unknown by the judge's refusal |
+| FL-4 | the verdict, its claims, points and binding are unchanged by a refuted fact; a refuted order makes no fact | unit (both listings equal; computation claims Verified; backwards request → no fact); mutant `set refuted float fact refutes the verdict` |
+| FL-5 | the integer fact and every one-group output are unchanged; integer sets keep "not a float fold, or no claim" | byte-identity with `reorder.float` listed; `setreorder` unchanged in count |
+| FL-6 | the model's exact semantics: NaN names a stop, Inf and the sign of a zero are bits, binary32 at 32 bits; unsupported formats never reach the judge (import refuses them) | unit cases above; mutant `judge NaN reversal unnamed` |
+
+### How M4b-2b-1 is checked independently
+
+- **Unit.** The `setfloat` section (48 checks): the table above, each hand-built memory run by
+  `runConcrete` (the program's value) and judged over the union; the search's own witnesses for
+  `set_float` (binary64) and `set_float32` replayed; two operand roots of their own
+  (`set_float_roots`), three contributions to a cell (`set_float_repeat`), the listing, no fills,
+  the mixed fold, a refuted order, an integer set, a set of one float group against Theorem 13.
+  The M4b-1 case 9 (`setreduction`) now asserts the refutation it left Unknown, and the NB-2 cases
+  pin the float detail of a verdict the claims do not meet.
+- **Oracle.** Programs are binary32 as often as binary64 (`numpy.float32` for the arithmetic);
+  the interpreter stops on a NaN as the model does; every float refutation is replayed (F-1); an
+  integer program's float fact is Unknown with its one detail (F-5); the earlier rules stand.
+- **Mutation.** Four new mutants: the float witness dropped, Proven without a witness, a refuted
+  float fact refuting the verdict, the NaN reversal unnamed. `set integer fact on an unverified
+  claim`, equivalent in M4b-2a, is killable now (its branch would print another float detail) and
+  is no longer declared.
+- **Byte-identity.** Against the M4b-2a commit: every output identical except
+  `reduction.reorder.float` on Verified float set verdicts without `trivial`, each change listed.
+
+### What stays Unknown
+
+Every float fold with a cell of two contributions at which the fill sequence finds no
+difference (designed fills are M4b-2b-2); a fold of two operations; any set whose verdict is not
+Verified; everything M3, M4a, M4b-1 and M4b-2a leave Unknown.
+
+## M4b-2b-2: designed memories for the witness search (2026-11-16)
+
+The fill sequence draws its memories, and what it draws cannot refute signed arithmetic. With
+`nsw` on the multiplication as well as on the addition, which is what signed integer source
+compiles to, a product of two drawn values overflows unless one of them is small, the run stops,
+and a stopped run is no witness: 64 fills at every point find nothing, and the integer fact of a
+fold that a two-line memory refutes stayed Unknown. M4b-2b-2 adds **designed memories**: a small
+fixed family, built from the trace at the point, judged by the same judge.
+
+A designed memory is a place to look and never evidence. The fact is Refuted only when
+`reversalDiffers` finds, on that memory, that the program completes and the reversed fold of a
+cell overflows a flagged addition, differs in bits, or is NaN; a designed memory that shows no
+difference says nothing, and the fact is what the fill sequence left, Unknown. No rule that
+proves a fact is touched, no tier, no verdict; `lowering_eligible` reads Proven facts only, and
+`authorizes_lowering` is false as before.
+
+### The search
+
+1. The fill sequence, as before: at each of the first four points looked at, Theorem 13's 64
+   fills from the fixed seed. A witness it finds is the fact, and is the witness it found before
+   this milestone, memory for memory.
+2. Only where it found nothing at **any** of those points: the designed memories, at the same
+   points in the same order, each judged by `reversalDiffers` against the replay's prefix
+   constants. The first that shows a difference is the witness; its detail is the judge's, then
+   ", at a designed memory".
+3. `witnessFills = 0` asks for no search, drawn or designed: Unknown, as before.
+
+Both callers do this: Theorem 13's own search over one group (`checkReduction`) and Theorem 17's
+over the union of the listed groups (`joinSetReduction`), with the group's replay and the set's.
+
+### The family
+
+A function of the program, the sites and the point: nothing is drawn. The trace is read from the
+run of the memory that is zero in every cell an entry sets. A **target** is a cell with two
+contributions or more that holds no constant before its first event: the first three, in the
+order of their first events. For each target, with every other cell zero:
+
+| Fold | The target cell | Its first contribution | Its last | In the program's order | Reversed |
+| --- | --- | --- | --- | --- | --- |
+| integer, w bits, the reduction `nsw` and not `nuw` | INT_MAX | −1 | +1 | INT_MAX − 1, then INT_MAX: completes | INT_MAX + 1 overflows |
+| the same | INT_MIN | +1 | −1 | INT_MIN + 1, then INT_MIN: completes | INT_MIN − 1 overflows |
+| float (p = 53 for binary64, 24 for binary32) | 2^p | 1 | −2^p | (2^p ⊕ 1) ⊕ −2^p = 0: 2^p + 1 is a tie and rounds to the even significand | (2^p ⊕ −2^p) ⊕ 1 = 1 |
+| the same | the largest finite value, max | max | −max | (max ⊕ max) ⊕ −max = +∞, completes | (max ⊕ −max) ⊕ max = max |
+
+A contribution is a product, so it is given its value by one operand cell holding the value and
+the other holding 1 (the product is then exact, and no flag of the multiplication can stop it).
+Which operand holds it is tried both ways for the first contribution and for the last: the second
+operand, then the first, four memories for each pattern. A memory is **left out** when it would
+give one cell two values (the two contributions share an operand cell, or the target is an
+operand), when it would set a cell no entry sets (a root the program allocates), or when it is
+already listed. Contributions between the first and the last are whatever the memory makes them,
+zero unless they read a cell the memory sets; the judge decides. At most 3 · 2 · 4 = 24 memories
+at a point (`designedFillsAtMost`); since ±1 is also the other operand's value, at most 12 for
+integers and 18 for floats are ever distinct.
+
+### Where it applies
+
+| Condition | Otherwise |
+| --- | --- |
+| the listed sites are one operation with one set of flags | nothing designed: the judge reverses one operation |
+| an integer fold whose reduction carries `nsw` and not `nuw`; or a float fold | nothing designed: without `nsw` no reversal overflows; with `nuw` −1 is the largest unsigned value and both patterns stop the program itself |
+| the zero memory runs to the end at the point | nothing designed |
+| a cell with two contributions that holds no constant before its first event | no target: a cell the program initialises (a fresh allocation set to zero, a stored constant) starts its fold at that constant, whatever the entry holds |
+| the operand cells of the first and of the last contribution can be set, and consistently | that memory is left out |
+| `witnessFills > 0`, and the fill sequence found nothing at any point looked at | not tried |
+
+One group and several are the same search: `designedWitness` over a group with the group's
+replay, `designedWitnessOver` over the union with the set's, as `reorderWitness` and
+`reorderWitnessOver` are.
+
+### What it does not find
+
+Stated because Unknown here is not "no witness exists":
+
+- A cell that starts at a constant. From zero a reversal of two contributions overflows exactly
+  when the program does; with three, −1, +1, INT_MAX is a witness the family does not hold.
+- Contributions that are one product. Two that read the same operand cells cannot be told apart
+  by any memory. A second nest that runs twice gives p, q, q: both integer patterns then overflow
+  in the program's own order (−1, +1, +1 from INT_MAX; +1, −1, −1 from INT_MIN), while INT_MAX
+  with −2, +1, +1 is a witness outside the family.
+- An operand in a root the program fills: the family sets argument cells only.
+- `nuw`, alone or with `nsw`. No reversal overflows an unsigned sum of a run that completed; a
+  signed witness under both flags needs a memory of another shape.
+- Targets after the third, and pairs of contributions other than the first and the last.
+
+Each stays Unknown with the reason the rule gave, as before.
+
+### Contract
+
+`ReductionSemantics`: `designedReversalFills(program, group, prefix, parameters, maxCells)` lists
+the family, for the checker and the tests; `designedWitness` and `designedWitnessOver` judge it
+(`searchDesigned`), with `fills` only as the switch of item 3. `searchReversal`, `randomEntry`
+and `reversalDiffers` are unchanged, byte for byte. `DomainChecker`: the two search lambdas
+remember the points they looked at and, where the fill sequence refuted at none, ask the designed
+search at each. The Unknown fact of a search that finds nothing has the detail it had.
+
+### Obligations
+
+| ID | Obligation | On failure |
+| --- | --- | --- |
+| DM-1 | designed memories are judged only after the fill sequence found nothing at every point looked at: a witness the fill sequence finds is unchanged | unit (`set_float`, `set_nsw`, `d_floats`: the fact is the drawn memory, cell for cell, and no member of the family); the output comparison; mutants `… designed witness replaces a drawn one` |
+| DM-2 | no search without fills | unit (`witnessFills = 0`, and the two functions with `fills = 0`); mutant `designed search with no fills asked` |
+| DM-3 | Refuted only by the judge, on that memory | unit (every refuted fact run and judged again; `d_repeat`, whose two members both stop, stays Unknown); both oracles replay the witness with their own interpreters; mutant `designed memory not judged` |
+| DM-4 | the family is fixed and is the documented one | unit (members compared cell for cell: `d_set`, `d_shared`, `d_late`, `d_gemm`, binary64, binary32); the Theorem 17 oracle builds it again from this section and demands the very memory; 15 mutants of the family |
+| DM-5 | Unknown where no member is a witness, never Proven | unit (`d_repeat`, `d_both`); oracle (a fact left Unknown has no witness in the oracle's family) |
+| DM-6 | every point looked at is tried, in order, over the whole union | unit (`d_constant`: the witness is at the second point); mutants `… at the first point only`, `… over the first group`, `… judges the first group` |
+| DM-7 | the verdict, its claims, tiers, points and binding, every Proven fact and every lowering field are unchanged | the output comparison admits one change only, a reorder fact Unknown to Refuted with a point and a memory; unit (claims Verified, no refutation of the verdict) |
+
+### How M4b-2b-2 is checked independently
+
+- **Unit.** The `designed` section (140 checks), on sixteen-bit integers, where the solver's
+  multiplications are small and the search is the same: two groups in signed arithmetic, which
+  the fill sequence leaves Unknown at every point of the scope and the first designed memory
+  refutes; the family member by member; a shared operand cell; a target after cells of one
+  contribution; a target after a cell that gets one product twice, by Theorem 13 and as a set of
+  one group; a stored constant, and the witness at the second point; a matrix product in one
+  group with the proposer's request; binary64 and binary32 with one fill; a family with no
+  witness; no fills; drawn witnesses unchanged on both search paths; where nothing is designed.
+- **Oracle, Theorem 17.** After the generated programs, which are unchanged with their seeds,
+  one program in six is signed arithmetic in 32 bits, from a stream of its own. The family is
+  built again in Python from this section and the oracle's own trace, each member run and judged
+  by the oracle's interpreter, which now stops on a flagged multiplication too. A fact refuted at
+  a designed memory must carry the first member that is a witness, at the first point that has
+  one; a fact left Unknown must have none. Every refutation is replayed as before.
+- **Oracle, domain.** Two programs more, after all others: a matrix product and two sibling
+  nests whose contributions share an operand cell, in signed arithmetic. Their witnesses are
+  replayed by `check_witness`, and a run with fewer than two designed witnesses fails.
+- **lit.** `dom_reduction.mlir`, `SIGNED`: the printed fact, its words and its memory.
+- **Mutation.** 26 new mutants: 11 of the search and 15 of the family.
+- **Output comparison** against `dd2432e`: every driver output byte for byte, or equal but for
+  reorder facts that were Unknown and are Refuted with a point and a memory, each listed.
+
+### What stays Unknown
+
+What "What it does not find" lists; a fold of two operations; a float fold whose every cell has
+one product twice; any set whose verdict is not Verified; everything the earlier milestones
+leave Unknown.
+
+## Validation of M4b-2b-2 (2026-11-16, LLVM 24.0.0git, Z3 4.8.12, base dd2432e)
+
+Every result below is from one frozen tree (hash `b3a5fdf4…` over `include/GeneralizedGemm`,
+`lib/GeneralizedGemm` and `research/generalized-gemm`), the same at the start, after each phase
+and at the end, with every subprocess under a limit. Four phases, one after the other. It is a
+targeted validation, as the milestone was authorized: what the change reaches, not the whole
+baseline again. The binaries it is compared with were built from `dd2432e` before any edit.
+Times are local.
+
+| Check | Time | Exit | Result |
+| --- | --- | --- | --- |
+| Build, Debug | 03:20:14 | 0 | 0 warnings |
+| CTest, the five suites the change reaches | 03:20:14 to 04:01:45 | 0 | 5 of 5: `domain` (the unit core), `domain-programs`, `setdomain-programs`, `setreduction-programs`, `lit` |
+| G5a/G5b unit, core (in CTest) | 899 s | 0 | 1,545 checks, 0 failures: `designed` 140 (new); the other sections are untouched (the file has no line removed or altered) and count as before: `setreduction` 88, `setreorder` 120, `setfloat` 48, `segments` 228, `phase4` 68 |
+| lit (in CTest) | 201 s | 0 | 29 of 29, `dom_reduction.mlir` with its `SIGNED` block among them |
+| Theorem 17 oracle, seed 1 (in CTest) | 977 s | 0 | 36 programs (the 30 generated, unchanged with their seeds, and 6 in signed arithmetic), 0 failures: 72 symbolic, 13 whole-scope and 2 point verdicts verified, 202 points and 988 folds, 32 computation and 8 domain refutations replayed. Designed: 68 memories of the oracle's own family run and judged; 6 facts refuted at a designed memory, each the family's first witness at the first point that has one, cell for cell; 4 facts left Unknown whose family has members and no witness. 8 integer refutations replayed (2 drawn, 6 designed), 8 float (4 binary32, 4 binary64); 26 float facts left Unknown, none with a witness in the family |
+| Domain oracle, seed 1 (in CTest) | 2,490 s | 0 | 116 programs, 0 disagreements; 33 witnesses replayed, 4 of them designed |
+| Set-domain oracle, seed 1 (in CTest) | 1,132 s | 0 | 30 programs, 0 failures |
+| Output comparison against `dd2432e`, the oracles' programs | 04:08:31 to 04:58:37 | 0 each | The Theorem 17 oracle's 36 programs: 33 byte-identical, 3 differ only in admissible facts (6). The domain oracle's 116: 113 byte-identical, 3 differ only in admissible facts (3) |
+| Output comparison against `dd2432e`, lit | 08:54:58 to 08:58:28 | 0 | 88 RUN lines of every driver, each test run as lit runs it: 87 byte-identical, 1 differs only in an admissible fact, `set_signed`. This is the third run of this comparison. The first (04:02:07 to 04:08:31, the same counts) ran each line bare: ten lines of the termination and G1 drivers that use lit's `%t` were compared without their inputs or by an emptied output, which compares nothing, and one of them wrote a file `%t.before` into the repository root. The second (08:51:02) gave the old and the new binaries temporary directories of their own and reported eight differences in `term_widths.mlir`, all the program fingerprint, which reads the input file's path; on the same paths there is none |
+| Output comparison, in all | | | 240 driver runs: 233 byte-identical; 7 differ only in reorder facts that were Unknown and are Refuted with a point and a memory, 10 facts, all at a designed memory; nothing else differs. Of programs that existed before: 87 of 87 RUN lines, 30 of 30 and 113 of 114 identical; the one change is the domain oracle's `p28` |
+| Domain oracle, seed 20261116 | 04:02:07 to 04:30:21 | 0 | 76 programs, 0 disagreements; 13 witnesses replayed, 2 designed |
+| Theorem 17 oracle, seed 20261116, 30 programs | 04:02:07 to 04:20:37 | **1** | 36 programs, 0 disagreements, and one floor of the oracle not met: 2 float swaps that change the result where 3 are asked. Not a pass. The floor is about the oracle's own fold check, predates this milestone, and is missed alike by the `dd2432e` oracle on the `dd2432e` binary at this seed (04:31:05 to 04:47:37, exit 1, the same line): 30 programs are too few at this seed. The floor was not lowered |
+| Theorem 17 oracle, seed 20261116, 60 programs | 04:31:05 to 05:02:26 | 0 | 72 programs (42 integer, 15 binary64, 15 binary32), 0 failures, every floor met: 120 symbolic and 36 whole-scope verdicts, 368 points and 1,777 folds; 148 designed memories judged, 12 designed refutations equal to the family's first witness, 8 facts left Unknown with a family that shows nothing; 16 integer and 10 float refutations replayed |
+| Mutation, domain harness, the 55 mutants on the reorder search and the reorder facts, two workers, nothing else running | 05:02:46 to 06:53:55 | 0 | 51 run, 51 killed by a test's own assertion; 0 survived, 0 timeouts, 0 resource limits, 0 harness errors; the baseline passing (every section, the 512-program sweep and the four oracles, about an hour). The 26 new mutants are killed by `designed`. Of the 25 that existed (the 11 of `ReductionSemantics.cpp` that are run and 14 of `DomainChecker.cpp`'s fact blocks), 13 are killed by `designed`, 9 by `setreorder`, 2 by `setreduction`, 1 by `setfloat`: `designed` was run first (`--first`), which decides the test that is named and nothing else. 4 of the 55 are declared equivalent by the harness's list, which records its 19 entries and executes none; the caveats recorded for two of them in M4b-2b-1 stand (`integer flags ignored` is stale, `integer unverified admitted` changes a detail string). No equivalence was declared or removed |
+| ASan, UBSan, leaks: the domain core, once, alone on the machine | 06:54:14 to 08:49:19 | 0 | 0 reports; 1,545 checks, 0 failures, in 114 min 38 s (`designed` 430 s; `segments` 1,250 s, every query within the solver limit) |
+| Not run | | | The CTest suites and harnesses of the other phases (G1 to G4a, synthesis, termination, identity, the 512-program sweep as a suite): no file of theirs changed; the sweep and the identity oracle ran once as the mutation baseline. A Release build. The 192 mutants this run did not name (177 that run, 15 declared equivalent): with the four G3b and G3a mutants open since M4-0 and the mutants not rerun at `9bb3cf0`, they stay as recorded |
+
+The ten facts, each Unknown ("the reduction carries nsw or nuw, so a partial sum can stop the
+run") before and Refuted ("reversing cell … overflows a flagged addition, at a designed memory")
+after:
+
+| Program | Fact | Point | The memory (every other cell zero) |
+| --- | --- | --- | --- |
+| `set_signed` of `dom_reduction.mlir` (new) | the set {0, 1} | n = 1 | A[0] = 1, B[0] = −1, C[0] = INT_MAX, D[0] = 1 |
+| Theorem 17 oracle `s0` (new), both listings | the set | n = 2 | A[1] = −1, B[1] = 1, C[1] = INT_MAX, D[1] = 1 |
+| `s2` (new), both listings | the set | n = 1 | A[0] = −1, B[0] = 1, C[0] = 1, D[0] = INT_MAX (D is the output) |
+| `s4` (new), both listings | the set | n = 1 | A[0] = −1, B[0] = 1, C[0] = INT_MAX, D[0] = 1 |
+| domain oracle `p28` (**existing**: a matrix product run twice, `nsw` on the addition, six contributions to a cell, which 64 fills at each of three points did not refute) | Theorem 13 | n = 1 | A[0, 0] = A[0, 2] = 1, B[0, 0] = −1, B[2, 0] = 1, C[0, 0] = INT_MAX |
+| domain oracle `signed` (new) | Theorem 13 | n = 1 | the same memory |
+| domain oracle `seg_signed` (new) | Theorem 13 | n = 1 | A[0, 0] = −1, A[0, 1] = 1, B[0, 0] = 1, C[0, 0] = INT_MAX |
+
+No expected output, assertion or test that existed was changed, removed or weakened. The lit
+file, the unit test and the oracles gained lines (the unit file has no line removed). The nine
+lines rewritten in the three scripts are two doc strings, a label, two format strings that
+print a flag only where a program has one, the harness's list of sections and its return of
+the test list. The solver cost of signed 32-bit products is recorded with the tests: the unit
+programs are sixteen bits wide (a fixture of the 32-bit form took 13.6 s against 2.3 s), and a
+first form of the oracle's new programs, three nests with nested loops, lost its termination
+certificate to the solver limit on a loaded machine and was replaced by plain two-nest ones.
+
+
+## Validation of M4b-2b-1 (2026-11-14 and 15, LLVM 24.0.0git, Z3 4.8.12, base c98571b)
+
+Every result below is from one frozen tree (hash `85a1741b…` over `include/`, `lib/` and
+`research/generalized-gemm`), with every subprocess under a limit, but **not from one
+uninterrupted run**. Part 1 (2026-11-14, 08:38:04 to 11:16:44) ran the build, the units and
+the six oracles; its next step, CTest, was interrupted at about 11:31:53, when the session that
+carried the run ended, and left no suite result. Part 2 (11:42:03 to 2026-11-15 03:28:54) ran
+CTest from its start, the byte comparisons, the sanitizers and the mutation harness. The hash
+was the same at the start of part 1, before part 2 and at the end. The binaries it is compared
+with were built from a snapshot of the M4b-2a commit. Times are local; a sub-step's end is its
+log's last write.
+
+| Check | Part, time | Exit | Result |
+| --- | --- | --- | --- |
+| Build, Debug | 1, 08:38:04 to 08:38:47 | 0 | 0 warnings |
+| G5a/G5b unit, core | 1, to 08:49:35 | 0 | 1,337 checks, 0 failures: `setfloat` 48 (new), `setreduction` 88 (86 and the two of case 9), `setreorder` 120 (118 and the two float details of the NB-2 cases), every other section's count as at the M4b-2a commit |
+| G4a, G3b and G3a units | 1, to 09:08:33 | 0 each | 3,658, 517 and 355 checks, 0 failures |
+| Theorem 17 oracle, seed 20261117 | 1, to 09:30:13 | 0 | 60 programs (30 integer, 15 binary64, 15 binary32), 0 failures: 103 symbolic and 29 whole-scope verdicts verified, 331 points and 1,811 folds against the program's cells, 68 computation and 14 domain refutations replayed, 25 Unknown verdicts, 110 one-group verdicts and 60 one-group fact sets equal to Theorem 13, 60 listings compared. Float: 14 refutations replayed (8 binary32, 6 binary64), 34 float facts left Unknown for want of a witness within the fills, 492 swaps of which 11 change the result. Integer, as in M4b-2a: 16 facts by the rule, 21 by `trivial`, 2 refutations replayed, 216 other-order comparisons, 546 permutation folds, 32 negatives. 175 fills whose run stops (a flagged overflow or a NaN) |
+| Set-domain, multi-group, G4a, domain and identity oracles | 1, to 11:16:44 | 0 each | 60 programs; 112 witnesses; 22 witnesses; 0 disagreements; 120 programs: 0 failures and 0 disagreements |
+| CTest, first attempt | 1, 11:16:44 to about 11:31:53 | none | interrupted with the session; no suite result |
+| `check-generalized-gemm` | 2, 11:42:03 to 13:54:21 | 0 | 22 of 22 CTest suites, `setreduction-programs` and `dom_reduction.mlir` with its `FLOAT` block among them |
+| Byte-identical against the M4b-2a commit | 2, to 14:07:54 | 0 | G1 42, G2a 14, G3a 14, G3b 14 outputs; G4a 18 functions; identity-report 6 outputs; 29 RUN lines, 0 differ: the 7 with `--groups` compared with `reduction.reorder.float` removed, and exactly 1 float fact changed, `set_float` of `dom_reduction.mlir`, Unknown to Refuted, "reversing cell 0 of root 2 changes its final bits"; every one-group output and every integer fact identical |
+| ASan, UBSan, leaks | 2, 14:07:54 to 17:07:30 | 0 each | 0 reports: the domain core, 1,337 checks, 0 failures (`segments` 1,057 s, every query within the solver limit this time); the G4a unit, 3,658 checks; 8 Theorem 17 oracle programs. The sanitized domain core was run once more after the run, alone (about 03:30 to 04:57:28): 1,337 checks, 0 failures, 0 reports; a repeat that this run did not need. The test-code index at `DomainTest.cpp:3032` recorded for M4b-2a is still in the tree and was not reached, no check before it having failed |
+| Mutation, domain harness, all 216, one worker | 2, 17:07:30 to 03:28:54 | 0 | 197 killed by a test's own assertion, 19 equivalent by the harness's list (which it records and does not execute), 0 survived, 0 timeouts, 0 resource limits, 0 harness errors, the baseline passing. The four new mutants are killed (`set float witness dropped` and `set refuted float fact refutes the verdict` by `setreduction`, `set float proven without a witness` by `setreorder`, `judge NaN reversal unnamed` by `setfloat`). `set integer fact on an unverified claim`, declared equivalent in M4b-2a, is killed by `setreorder` and no longer declared. No equivalence was declared in this milestone. Two declarations inherited from G5a in `ReductionSemantics.cpp` leave every status, tier and witness as it is but change an explanatory detail string: `integer unverified admitted` (no test pins that string) and `integer flags ignored` (which, by reading, `setreorder` has pinned since M4b-2a, so the mutant is killable and its entry stale); neither was executed |
+| Not run | | | A Release build of this milestone's sections; the G4a, G3b and G3a harnesses (no file of theirs changed); the four G3b and G3a mutants open since M4-0 stay open |
+| Outside the plan | 2, 11:42:55 to 11:42:57 | 0 | A 9-check run of the `binding` section of the same binary under a passive solver-query timer, which overlapped CTest's second suite (`relational`, passed) for about two seconds |
+
+## Validation of M4b-2a (2026-11-13, LLVM 24.0.0git, Z3 4.8.12, base 184d0eb)
+
+Every result below is from one frozen tree (hash `2765d220…` over `include/`, `lib/` and
+`research/generalized-gemm`), unchanged from the start of the run to its end, with the suites
+run one at a time and every subprocess under a limit. The binaries it is compared with were
+built from a snapshot of the M4b-1 commit. Three earlier frozen runs were stopped, each for a
+wrong expectation on the oracle's or a unit case's side and none for the checker (the
+other-order comparison applied to a union with a cross read; the `set_nsw` case accepting an
+Unknown fact beside the Refuted one; the blanket "a `reads_output` union is never verified"
+rule, wrong for a guarded reading nest at a point where it does not run); each correction is
+described in the M4b-2a section above, and the whole run was repeated after each.
+
+| Check | Result |
+| --- | --- |
+| `check-generalized-gemm` | 22 of 22 CTest suites, `setreduction-programs` (30 programs, seed 1: 11 integer facts by the rule, 2 refutations replayed) and `dom_reduction.mlir` with its `A` and `NSW` checks among them |
+| G5a/G5b unit, core | 1,276 checks, 0 failures: `setreorder` 109 (new), `setreduction` 86 (one assertion strengthened), every other section's count unchanged |
+| G4a, G3b and G3a units | 3,658, 517 and 355 checks, 0 failures, as before |
+| Release build | the `setreorder` and `setreduction` sections pass (before the two guard programs were added: 99 and 86 checks); the `set_nsw` witness is found there too |
+| Theorem 17 oracle, seed 20261116 | 60 programs, 30 integer and 30 double, 0 failures: 94 symbolic and 36 whole-scope verdicts verified, 316 points and 1,753 folds against the program's cells, 72 computation and 14 domain refutations replayed, 32 Unknown verdicts with no refuted component, 114 one-group verdicts and 66 one-group fact sets equal to Theorem 13, 60 listings compared; integer: 10 facts proven by the rule with their structure checked, 17 by `trivial`, 4 refutations replayed, 60 other-order program comparisons, 300 permutation folds, 32 negative shapes never proven, 143 flagged fills that stop |
+| Set-domain, multi-group, G4a, domain and identity oracles | 0 disagreements each (60 programs, 102 witnesses, 27 witnesses, 40 programs, 120 programs) |
+| Byte-identical against the M4b-1 commit | G1 42, G2a 14, G3a 14, G3b 14 outputs; G4a 18 functions; identity-report 6 outputs; 28 RUN lines, 0 differ: the 6 with `--groups` compared with `reduction.reorder.integer` removed, and exactly 2 integer facts changed, both Unknown → Proven Symbolic by the rule (`set_a` of `dom_reduction.mlir` and of `dom_sets.mlir`); every one-group output identical |
+| ASan, UBSan, leaks | 0 reports in the G4a unit (3,658 checks) and the 8-program Theorem 17 oracle run. The sanitized domain core, run inside the frozen run, failed two `segments` checks by the 3,000 ms solver limit (`sib_counter proposed`: the symbolic claim's path undecided; `sib_repeat`: the certificate's parameter domain unknown), the same two as M4b-1's loaded run, and then stopped at a UBSan report in test code: `DomainTest.cpp:3032` indexes `fin.segments()[0]` of the claim those failed checks had just found Unknown (an empty vector; reference binding to null). Alone on the idle machine after the run (`san-core-idle.sh`), the same binary passes every section: 1,276 checks, 0 failures, 0 reports, `segments` 990 s. The test-code index after a failed check is pre-existing (M2) and reachable only after a check has already failed; a size guard there would turn the report into that failure and is left for a later milestone |
+| Mutation, domain harness, all 212 | 192 killed by a test's own assertion (every M4b-2a mutant but one by `setreorder` or `setreduction`), 19 equivalent with reasons (`integer guard loads ignored` declared before the run, with its evidence), **1 survived**: `set integer fact on an unverified claim`, which drops the `claim != Verified` conjunct of the fact block. It is equivalent: `foldForm` is `OrderedFloat` by default and assigned only in the two branches that make the verdict Verified, so at the fact block `claim != Verified` entails `isFloat`, and the conjunct is a defence (as `T13 without exact order` and `set reduction exact order not needed` are). It was first read as a test gap, two NB-2 cases were added to `setreorder` (a flat request; domain claims lost by hand: Verified computation claims, an Unknown verdict, every fact Unknown), and the survivor-only harness run on that tree let it survive again, which confirmed the analysis; it is declared equivalent with that reason on the final tree. 0 timeouts, 0 crashes, 0 untested |
+| Not rerun | The G4a, G3b and G3a harnesses (no file of theirs changed); the four G3b and G3a mutants open since M4-0 stay open |
+| Final tree, two steps | (1) Hash `cbd1ae93…`, the frozen tree plus the two NB-2 cases: Debug domain core 1,285 checks, 0 failures (`setreorder` 118); lit 23 of 23; the harness for the survivor alone, its baseline passing: SURVIVED again (so not a test gap); the sanitized domain core alone on the idle machine: 1,285 checks, 0 failures, 0 reports (`segments` 1,121 s); whitespace clean; tree unchanged through the run. (2) Hash `6d96ec4a355711cb…`, plus the equivalence declaration in `domain_mutation.py` (a harness file: no binary changes): every mutant's pattern occurs once, 212 mutants, 20 equivalents; the result stands at 192 killed, 20 equivalent, 0 survived, 0 timeouts, 0 crashes. The 191 other kills and the 19 earlier equivalences are the frozen tree's; neither step can turn a kill into a survival |
+
+## Validation of M4b-1 (2026-11-12, LLVM 24.0.0git, Z3 4.8.12, base c6c7ded)
+
+Every result below is from one frozen tree (hash `98ec7f04…` over `include/`, `lib/` and
+`research/generalized-gemm`), unchanged from the start of the run to its end, with the
+suites run one at a time and every subprocess under a limit. The binaries it is compared
+with were built from a snapshot of the fix commit. A first run on the tree before three
+corrections of the Theorem 17 oracle was stopped at its oracle step; the corrections (the
+union's written cells, not whole roots; a whole-scope verdict lists the eventful points; the
+shared-cell shapes write overlapping cells) changed no checker, and the whole run was
+repeated. The final tree adds one line to `domain_mutation.py`, the equivalence of the one
+survivor; its own run is the last row.
+
+| Check | Result |
+| --- | --- |
+| `check-generalized-gemm` | 22 of 22 CTest suites, `setreduction-programs` and `dom_reduction.mlir` among them |
+| G5a/G5b unit, core | 1,166 checks, 0 failures: `setreduction` 85, and every earlier section's count unchanged |
+| G4a, G3b and G3a units | 3,658, 517 and 355 checks, 0 failures, as before |
+| Theorem 17 oracle, seed 20261115 | 60 programs, 30 integer and 30 double, 0 failures: 105 symbolic and 37 whole-scope verdicts verified, 363 points and 2,178 folds against the program's cells, 68 computation and 16 domain refutations replayed, 16 Unknown verdicts with no refuted component, 116 one-group verdicts equal to Theorem 13, 60 listings compared; 624 double swaps of which 11 change the result, 570 integer swaps of which none does |
+| Set-domain, multi-group, G4a, domain and identity oracles | 0 disagreements each. The set-domain oracle's 30-program run met only 4 of its 5 "roots may alias" cases, identically on the M4a and fix-commit binaries; at 60 programs on the same frozen binaries it passes with 8 |
+| Byte-identical against the fix commit | G1 42, G2a 14, G3a 14, G3b 14 outputs; G4a 18 functions; 25 RUN lines, the 3 with `--groups` compared with the new `reduction` entries removed; 6 identity outputs: 0 differ |
+| ASan, UBSan, leaks | 0 reports: G4a 3,658 checks, 8 Theorem 17 oracle programs, domain core 1,166 checks. Two checks of the `segments` section failed in the loaded run by the 3,000 ms solver limit (the section took 958 s against 771 and 787 s before) and pass alone (228 checks, 393 s) and in the final tree's idle run |
+| Mutation, domain harness, all 200 | 182 killed by a test's own assertion (every M4b-1 mutant by `setreduction`), 17 equivalent with reasons, 1 survived: `set reduction exact order not needed`, implied as `T13 without exact order` is, declared equivalent afterwards; 0 timeouts, 0 crashes |
+| Mutation, G4a harness, `ComputationChecker.cpp` | 94 killed, 6 equivalent, 0 survived, 0 timeouts, 0 crashes |
+| Not rerun | The 48 G4a mutants of other files, the G3b and G3a harnesses (no file of theirs changed); the four G3b and G3a mutants open since M4-0 stay open |
+| Final tree | code hash `027a315f…`, unchanged through its run: the sanitized domain core alone on an idle machine, 1,166 checks, 0 failures, 0 reports; the domain harness again, 182 killed, 18 equivalent, 0 survived, 0 timeouts, 0 crashes; whitespace clean |
+
+## Validation of M4a (2026-11-11, LLVM 24.0.0git, Z3 4.8.12, base 5e08faa)
+
+Every result below is from one frozen tree (hash `9d1bed38…` over `include/`, `lib/` and
+`research/generalized-gemm`), unchanged from the start of the run to its end, with the
+suites run one at a time and every subprocess under a limit. The M4-0 binaries it is
+compared with were built from a snapshot of the commit, not from this worktree.
+
+| Check | Result |
+| --- | --- |
+| `check-generalized-gemm` | 21 of 21 CTest suites, the new `setdomain-programs` among them |
+| G5a/G5b unit, core | 1,037 checks, 0 failures: `setdomain` 120, and every M4-0 section's count unchanged |
+| G4a, G3b and G3a units | 3,658, 517 and 355 checks, 0 failures, as at M4-0, section by section for G4a |
+| Set oracle, seed 20261113 | 60 programs, 0 failures: 480 finite and 460 symbolic claims verified and 2,296 points checked against Theorem 15; 36 finite refutations replayed, all of them interleaved unions; 120 listings compared; 308 one-group sets equal to the group's own claim; shared cells refuted on one root 194 times and proven across roots apart 36 times, and Unknown for roots that may alias 20 times; 90 segments empty at a point |
+| Identity, domain, G4a and multi-group oracles, seed 20261113 | 0 failures, 0 disagreements |
+| Byte-identical against M4-0 | G1 42, G2a 14, G3a 14, G3b 14 outputs; G4a 18 functions; 19 computation and domain RUN lines, G4a's set lines among them; 6 identity-driver outputs: 0 differ |
+| Lit | `dom_sets.mlir`: both cases through `--groups` |
+| ASan, UBSan, leaks | Clean: domain core 1,037 and G4a 3,658 checks, 8 set-oracle and 12 identity-oracle programs against the sanitized drivers |
+| Mutation, domain harness, all | 183 mutants: 169 killed by a test's own assertion (every M4a mutant by `setdomain`), 14 equivalent with reasons, 0 survived, 0 timeouts, 0 crashes |
+| Mutation, G4a harness | The mutants of `ComputationChecker.cpp` and `SiteSets.cpp`: 103 killed, 6 equivalent, 0 survived, 0 timeouts, 0 crashes |
+| Mutation, G3b, strict | The mutants of `SiteSets.cpp`: 4 killed |
+| Not rerun | The mutants of files M4a did not change: 33 in the G4a harness, 110 in the G3b harness, the 88 of the G3a harness. The four G3b and G3a mutants left open at M4-0 stay open |
+
+## Validation of M4-0 (2026-11-10, LLVM 24.0.0git, Z3 4.8.12, base 7bf6534)
+
+Every result below is from one frozen tree (hash `1846937d…` over `include/`, `lib/` and
+`research/generalized-gemm`), unchanged from the start of the run to its end, with the
+suites run one at a time and every subprocess under a limit. The last mutation row is the
+final tree (`3f093064…`), which adds one equivalence to `computation_mutation.py` and
+nothing else. A first run, on the tree before the oracle fixes of this milestone, stopped
+at the domain mutation baseline: the identity oracle expected G4a's whole-scope tier
+whenever G4a verified with every point, and G4a demotes to Point when a replay stays open.
+The oracle was fixed and checked on eight seeds, and the whole run repeated.
+
+| Check | Result |
+| --- | --- |
+| `check-generalized-gemm` | 20 of 20 CTest suites, the new `identity-programs` among them |
+| G5a/G5b unit, core | 917 checks, 0 failures: `identity` 208, and every earlier section's count as at M3 (709) |
+| G4a, G3b and G3a units | 3,658, 517 and 355 checks, 0 failures: the counts the M3 binaries give, section by section for G4a |
+| Identity oracle, seed 20261112 | 120 programs, 0 failures: 1,857 whole groups and 8,031 refusals word for word, 5,163 cell relations (`C[0]` against `D[0]`: 263 apart when authorized, 60 may alias when not), the empty family 176 times whole scope, 107 times Point with a point removed, 128 times refuting every family and 266 times this family only, 57 flat families refuted over sibling loops, 45 closed gates |
+| Domain, G4a and multi-group oracles, seed 20261112 | 0 disagreements each: 114 domain specs, 60 + 20 G4a programs, 24 + 14 multi-group programs |
+| Byte-identical against the M3 binaries | G1 42, G2a 14, G3a 14, G3b 14 outputs, G4a 18 functions, 18 computation and domain lit RUN lines |
+| ASan, UBSan, leaks | Clean: domain core 917, G4a 3,658 and G3b 517 checks, and 12 identity oracle programs against the sanitized driver. G3b's finite route without its group bound stops with an AddressSanitizer report |
+| Mutation, domain harness | 167 mutants: 152 killed by a test's own assertion (41 by `identity`), 15 equivalent with reasons, 0 open |
+| Mutation, G3b and G3a, strict | The mutants of `SymbolicCandidateChecker.cpp`, `SiteSets.cpp` and `FiniteDomain.cpp`: 68 killed of 72, **4 open**. `no order accepted`, `bound may read inner levels` and `memory term adopted` end in a segfault inside the mutated code with no assertion first. `assumptions not passed to the check` fails two assertions and the test then crashes on an unguarded index. All four are guards older than M4-0, on lines it did not change; three sit inside functions it did change (`checkFamilySymbolic` twice, `enumerateDomain` once). The harnesses' own runners count a crash as a kill; the strict runner never does, and they stay open |
+| Mutation, G4a harness, final tree | The mutants of `ComputationChecker.cpp` and `SiteSets.cpp`: 103 killed, 6 equivalent, 0 open. `set lists a site twice` is equivalent since M4-0: the gate refuses a site twice first, in the same words |
+
+## Validation of M3 (2026-11-08, LLVM 24.0.0git, Z3 4.8.12, base 8d6c8d0)
+
+Every result below is from one frozen tree (hash `dea9972f…` over `include/`, `lib/` and
+`research/generalized-gemm`), unchanged from the start of the run to its end, with the
+suites run one at a time and every subprocess under a limit. The first run of the same
+script, on the tree before the listing fix above, failed only the multi-group oracle; the
+whole run was repeated after the fix.
+
+| Check | Result |
+| --- | --- |
+| `check-generalized-gemm` | 19 of 19 CTest suites, the new `multigroup-programs` among them |
+| G4a unit, every section | 3,658 checks, 0 failures; `sets` 775 of them; no earlier section's count changed |
+| G5a/G5b unit, core | 709 checks, 0 failures, as at M2 |
+| Multi-group oracle, seed 20261111 | 94 programs and 1,200 set claims: 468 Verified (254 finite at scope, 214 symbolic), 343 Refuted with the witness replayed (119 with a cross-group read), 389 Unknown; 704 points' facts matched exactly; 188 listings and 253 one-group sets compared; 106 sets that leave out a writer of their cells, none verified; perturbations seen: 4,492 drops, 4,385 duplicates, 95 float swaps; 0 disagreements, 0 timeouts |
+| G4a oracle, seed 20261111 | 140 programs, 207 Verified and 46 Refuted claims, 46 witnesses replayed, 0 disagreements |
+| Mutation, G4a harness | 142 mutants: 137 killed by a test's own assertion (all 34 new ones by `sets`), 5 equivalent (G4a's, unchanged), 0 survived, 0 timeouts, 0 resource limits, 0 harness errors |
+| ASan, UBSan, leaks | Clean: G4a unit 3,658 checks and 6 multi-group oracle programs |
+| Byte-identical | G1 42, G2a 14, G3a 14, G3b 14 outputs against 2542b68; G4a 18 against 4ecb778 and 18 against 8d6c8d0; 18 computation and domain lit RUN lines against 8d6c8d0 |
+| Not re-run | The domain mutation suite: no domain source, domain test or domain output changed, and the domain unit core and every domain lit RUN line give the M2 results |
+
+## Validation of M2 (2026-11-07, LLVM 24.0.0git, Z3 4.8.12, base 2a1afa0)
+
+Every result below is from one frozen tree (hash `f1c676a8…` over `include/`, `lib/` and
+`research/generalized-gemm`), unchanged from the start of the run to its end, with the
+suites run one at a time and every subprocess under a limit. A first run of the same
+script on the tree before the mutation follow-ups above had one CTest timeout (the oracle
+at 1800 s) and five open mutants; the tests were added, and the whole run repeated.
+
+| Check | Result |
+| --- | --- |
+| `check-generalized-gemm` | 18 of 18 CTest suites, G1 to G5a and G5b-M1/M2; the oracle suite 1,840 s of its 3,600 |
+| G5a/G5b unit, core | 709 checks, 0 failures; `segments` 228 among them (`testSegments` and `testSegmentGates`), `siblings` 60 unchanged |
+| Oracle, seed 20261110 | 194 programs: 102 flat (375 points against S(v), 5,543 Theorem 13 runs, 3,502 permutations, 45 witnesses) and 92 segmented (134 verified symbolic claims, 475 points against Theorem 15, 7,582 segmented Theorem 13 runs, 212 empty segments at a point, 238 shared-cells proofs and 67 refutations replayed, 88 `LOGICAL_BOX` and 96 `CONSTANT_BOX` segment terms at every logical point, 4 without a proposal), 0 disagreements, 0 timeouts |
+| Mutation | 126 mutants: 116 killed by a test's own assertion, 10 equivalent with reasons in `domain_mutation.py`, 0 survived, 0 timeouts, 0 resource limits, 0 harness errors |
+| ASan, UBSan, leaks | Clean: unit core 709 checks and 8 oracle programs |
+| Byte-identical | G1 42, G2a 14, G3a 14, G3b 14 outputs against 2542b68, G4a 16 against 4ecb778 |
+| Lit | `dom_segments.mlir`: the sibling program verified through `--segments`, Unknown without |
+
+## Validation of M1 (2026-11-06, LLVM 24.0.0git, Z3 4.8.12, base 8aa5447)
+
+Every result below is from one frozen tree, unchanged from the start of the run to its
+end, with the suites run one at a time and every subprocess under a limit.
+
+| Check | Result |
+| --- | --- |
+| `check-generalized-gemm` | 18 of 18 CTest suites, G1 to G5a and G5b-M1 |
+| G5a/G5b unit, core | 481 checks, 0 failures; `multiplicity` 61 and `siblings` 60 among them |
+| Oracle, seed 20261108 | 102 programs, 390 points against S(v), 5,929 Theorem 13 runs, 3,792 permutations, 40 witnesses replayed, 0 disagreements, 0 timeouts |
+| Theorem 14, oracle | 42 repeat specs generated: 9 accepted `LOGICAL_BOX`, 9 `CONSTANT_BOX`, 14 refused (`COUNTED`/`UNKNOWN`), 9 whose family could not be mapped, 1 with no proposal. 54 μ terms evaluated at every logical point (27 `LOGICAL_BOX`, 27 `CONSTANT_BOX`), 6 zero-event points of L(v) checked, 0 disagreements. The run fails below 4 `LOGICAL_BOX`, 1 `CONSTANT_BOX`, 2 refusals or 1 zero-event point |
+| Mutation | 91 mutants: 82 killed by a test's own assertion, 9 equivalent with reasons and evidence in `domain_mutation.py`, 0 survived, 0 timeouts, 0 resource limits, 0 harness errors |
+| ASan, UBSan, leaks | Clean: unit core 481 checks and 8 oracle programs |
+| Byte-identical | G1 42, G2a 14, G3a 14, G3b 14 outputs against 2542b68, G4a 16 against 4ecb778 |
+
+The one earlier failure of this run was in the oracle, not the checker: its zero-event
+check enumerated the logical nest without the spec's logical guard, so it asked for μ at a
+point outside L(v), where Theorem 14 says nothing. The oracle now keeps the guard, and
+skips the zero check where the guard reads a repeat variable, since no box exists there.
+
+## Changes to earlier phases
+
+None in G1 to G4a. In G5a, `DomainMultiplicity` gains `LogicalBox`, and the one unit test
+that pinned the old limitation (`growing_repeat` in `testGapsG5` expected `Counted`) now
+expects `LogicalBox` with its μ checked. No other assertion changed.
+
+M2 changes no G5a or M1 assertion or expected output: `testSiblings` still pins the flat
+route's answers for the sibling programs (Unknown, never a claim), and the segmented
+route is reached only through a request with segments or `--segments`. New public
+surface: `Segment`, `DomainRequest::segments`, `SegmentFacts`,
+`CheckedDomain::segments()` and `sharedCells()`, `DomainLimits::events`,
+`eventStates`, `proveSegmentedOrbit`, `proposeSegmentedDomain`,
+`DomainAnalysisRequest::segmented`, the driver's `--segments`, and `shared_cells`,
+`segments` and per-event `state` in the JSON.
+
+**Proposer fix (2026-11-11).** The flat domain proposer's congruence atoms, y mod 2, 3
+and 4 for each order level, were built for every level whatever its width. The coordinate
+search can propose a one-bit comparison term as a coordinate, and the proposer then built
+`APInt(1, 2)`, which aborted a debug build before any report was printed (a release build
+would have built a bit pattern wider than its sort instead). A modulus the level's width
+cannot hold is now skipped, never truncated: a one-bit level gets no congruence, a two-bit
+level gets 2 and 3, three bits and up get all three. `proposalConditionAtoms` exposes the
+atoms to tests, untrusted like the rest of the proposer; no checker changed. The `proposer`
+section of the domain test and `dom_congruence.mlir` pin widths 1, 2, 8 and 32, the
+program that aborted, and a stepped loop whose proposal needs the congruence. The record
+is in `integration-backups-20261111/conditionatoms-crash/`.
+
+M4-0 changes no earlier assertion or expected output, and no output of an earlier driver.
+It changes refusal text only, for groups the enumerator never makes, as the gate table
+above lists. G3b's ScopeEnumerated needs every point of the recorded scope where it needed
+only an unsampled list. The domain test gains the `identity` section, first in its order.
+The synthesis and computation mutation harnesses re-anchor the mutants whose code moved
+into `SiteSets.cpp`, with the same edits, and the synthesis harness gains one.
