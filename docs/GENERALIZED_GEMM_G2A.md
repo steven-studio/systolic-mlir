@@ -297,6 +297,19 @@ reversed; refuted candidates put to the solver all the same). `T3 removed` of
 `termination_mutation.py` now takes both searches out: the second would otherwise stand in
 for the first.
 
+**What the search hides, and the test for it.** A guard distance is an affine rank with
+coefficients 1 and -1, so the least coefficients find it too. With T1 taken out
+(`T1 removed`), T2 proves most of T1's rows, and the two it does not, `b2_nsw` and `e_tri`,
+used to be UNKNOWN (T3 gave no rank for them with Z3 4.13.3): the unit test's table caught
+the mutant by them. The new search proves those two, so every row is proved without T1,
+three and a half times slower (528 s against 150 s for the test), and the table says
+nothing. The unit test therefore lists five rows whose ranks must come from T1 (`a_nsw`,
+`b2_nsw`, `e_tri`, `g_ne1`, `j_halve`, every level of each proof): T1 is tried first and
+its candidates are fixed terms, so the origin is the same whatever the solver. With that
+list the mutant is caught again, by six checks (the ranks come from T2 and, for `b2_nsw`
+and one level of `e_tri`, from the least coefficients). `T2 removed` is still shown by the
+table: no affine rank stands in for a modular distance.
+
 **Not changed, and said plainly.** T3 still takes its coefficients and constant from models,
 so whether T3 or the search after it finds a rank still depends on the solver; only the
 verdict no longer does, for ranks within the bound above. No test requires that it is T3

@@ -473,6 +473,26 @@ static void testCatalogue(const std::string &text) {
     }
   }
 
+  // Which family gave the rank. With T1 taken out, T2 proves most of T1's rows, and the
+  // least coefficients, the last of the chain, prove the two it does not (b2_nsw and e_tri,
+  // which were UNKNOWN without T1 before that search, with Z3 4.13.3): the table above is
+  // passed all the same. So the verdicts do not show that T1 is tried, and the origin of
+  // the ranks does. T1 comes first and its candidates are fixed terms that the checker
+  // judges: no model of the solver decides any of this.
+  for (const char *name : {"a_nsw", "b2_nsw", "e_tri", "g_ne1", "j_halve"}) {
+    SemanticProgram p = m.import(name);
+    TerminationResult result = analyze(p);
+    CHECK(result.certificate.has_value());
+    if (!result.certificate)
+      continue;
+    CHECK(!result.certificate->levels.empty());
+    forEachLevel(result.certificate->levels, [&](const RankLevel &level) {
+      if (level.origin != "T1 guard distance")
+        fprintf(stderr, "%s: a rank from %s\n", name, level.origin.c_str());
+      CHECK(level.origin == "T1 guard distance");
+    });
+  }
+
   // The same source means different things under wrap and nsw.
   CHECK(analyze(m.import("b3_wrap")).verdict.kind() !=
         analyze(m.import("b3_nsw")).verdict.kind());

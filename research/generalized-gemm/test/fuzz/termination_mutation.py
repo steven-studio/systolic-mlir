@@ -105,6 +105,8 @@ MUTANTS = [
     ("solver unknown is unsat", Z, "    case z3::unknown:\n      response.detail = solver.reason_unknown();\n      return response;", "    case z3::unknown:\n      response.answer = SmtAnswer::Unsat;\n      return response;"),
     ("scripts not screened", Z, "if (!isPlainScript(script, why)) {", "if (false) {"),
     # Coverage: a template that stops working must show.
+    # T1 shows by the origin of its ranks (the unit test's list of rows), not by a verdict: T2
+    # and the least coefficients prove every row of the table without it.
     ("T1 removed", R, "tryAll(guardDistances(component))", "false"),
     ("T2 removed", R, "tryAll(modularDistances(component, inside))", "false"),
     # Both searches of an affine rank: the second proves what the first does when the first
