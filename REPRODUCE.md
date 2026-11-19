@@ -736,3 +736,75 @@ MATCH: NO
 新封存不覆蓋舊版，包含 bitstream、LTX、可搬移組態與原始組態、完整建置／燒錄／實板／編譯器測試紀錄、時序與 DPTI 報告、Git 來源清單、工具雜湊及繁體中文文件。紀錄中的絕對暫存路徑屬歷史來源追溯；要重現請另選新的目錄。新編譯器建置目錄留在暫存位置，封存以建置紀錄、設定及雜湊記錄其來源，不保證暫存目錄永久存在。
 
 全域 `*.bit`／`*.log` 等忽略規則仍存在，因此部分新封存檔不會出現在一般未追蹤清單，但實際檔案與 `SHA256SUMS` 均保留。本次未執行 git add、commit 或 push；待使用者審核後，另行決定如何納入版本控制。
+
+## 18. Generalized GEMM records mode 實板驗證（2026-11-20）
+
+### 18.1. 範圍
+
+Records mode（`--affine-matmul-to-systolic="nest-records=FILE record-driven=true"`，見 `docs/GENERALIZED_GEMM_SCOPE.md` stage 3）以研究端工具寫出的 records 降階 GEMM，路徑為 `formulas`（record 的視圖閉式）或 `tables`（nest 自身位址的常數表）。`systolic-cc` 沒有此選項，C 程式不會走這條路徑；研究端 CTest（`generalized-gemm-nest-*-e2e`）只連結軟體 Runtime 模型。`research/generalized-gemm/test/fuzz/board_records_e2e.py` 補上實板：沿用研究端 E2E 已降階的 `driven` 變體目標檔（`70-sync.o`、`70-async.o`），改與 `board_stats.c` + `libsystolic_fpga_runtime.a` + 系統 libftdi1 連結（與 `systolic-cc --runtime=board` 相同），以研究端 driver 的 C 參考逐元素比對。它不是 CTest，需要已燒錄的開發板。
+
+選定 10 個案例：`drv_formulas`、`drv_tables_flat`（memref）、`scf_gemm`、`scf_tables_perm`、`scf_chain`（scf.for）、`whl_ne_bigger`、`whl_chain`、`whl_tables_flat`（scf.while）、`car_iter`、`car_tables_while`（carried 下標）；6 個 formulas、4 個 tables，維度 16×8×12，`scf_chain`／`whl_chain` 另含 16×8×8。每案兩組資料（整數值，須逐位元相同；隨機值，須在數值合約界限內）× sync／async，共 4 次執行。
+
+### 18.2. 指令
+
+```bash
+cd ~/work/systolic-mlir
+L=$HOME/work/llvm-project/build            # LLVM/MLIR 24，PATH 中不得有 llvm-18
+B=<第 5 節的 Release Build Directory>       # 含 bin/systolic-opt 與 runtime/libsystolic_fpga_runtime.a
+RB=<新的研究端 Build Directory>
+W=<新的工作目錄>
+CFG=$PWD/artifacts/fpga/tile_pipelined/1x8x8-3x4x4/2026-10-26-k8_16-k4_16-tclfix_1025/fpga_config.txt
+
+# 1. 研究端建置（只需 generalized-gemm-nest-report）
+cmake -S research/generalized-gemm -B "$RB" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DLLVM_DIR=$L/lib/cmake/llvm -DMLIR_DIR=$L/lib/cmake/mlir -DGG_SYSTOLIC_OPT=$B/bin/systolic-opt
+ninja -C "$RB"
+
+# 2. 研究端 E2E（軟體 Runtime 模型），以 --keep 保留降階產物
+mkdir -p "$W"
+for t in nest_driven_e2e nest_scf_e2e nest_while_e2e nest_carried_e2e; do
+  python3 research/generalized-gemm/test/fuzz/$t.py --nest-driver "$RB/generalized-gemm-nest-report" \
+    --systolic-opt $B/bin/systolic-opt --mlir-translate $L/bin/mlir-translate --llc $L/bin/llc \
+    --clang $HOME/work/clang24-build/bin/clang --runtime runtime/offload --llvm-lib $L/lib \
+    --keep "$W/work-$t"
+done
+
+# 3. 燒錄 10/26 映像（第 7 節 program_bit.tcl，.bit 見第 17 節），再上板
+env -i HOME=$HOME PATH=/usr/bin:/bin python3 -I research/generalized-gemm/test/fuzz/board_records_e2e.py \
+  --research-work "$W" --repo "$PWD" --build "$B" --clang $HOME/work/clang24-build/bin/clang \
+  --llvm-lib $L/lib --config "$CFG" --out "$W/board"
+```
+
+`--cases a,b` 只跑部分案例。輸出 `<out>/<suite>-<mode>/` 保留 driver、連結指令、`ldd`、執行輸出與 `probe.json`，`<out>/results.json` 為逐次結果。
+
+**Ubuntu 26.04 上的 Vivado：** 主機 2026-11-17 升級後只有 `libncurses.so.6`，Vivado 2026.1 會印出 `libncurses.so.5: cannot open shared object file` 卻仍以 0 結束，此時並未燒錄。不修改系統的作法：在私有目錄建立 `libncurses.so.5 -> /usr/lib/x86_64-linux-gnu/libncurses.so.6`、`libtinfo.so.5 -> /usr/lib/x86_64-linux-gnu/libtinfo.so.6` 符號連結，只對 vivado 指令設定 `LD_LIBRARY_PATH=<該目錄>`。燒錄是否成功以主控台的 `DONE: 1` 為準，不看結束碼。
+
+### 18.3. PASS 條件
+
+每個執行檔：連結系統 libftdi1、無 `libftdi_cosim`；結束碼 0、無 `BAD` 行；每筆 `RESULT` 的 `failed=0`，呼叫數等於 pass remark 預告的區域數；FTDI 層完成的呼叫數等於各 `RESULT` 呼叫數之和，DPTI 雙向位元組數皆大於 0；`RESULT` 筆數為案例數 × 4。`is_hardware` 是 `board_stats.c` 的連結期常數，不作證據。降階後的 kernel 沒有 CPU fallback，Runtime 失敗只會計入 `failed`。
+
+### 18.4. 2026-11-20 實測紀錄
+
+main `9ae074c` 的 Release 建置、10/26 映像（SHA-256 `75f982b4…`，`DONE: 1`）：
+
+| 案例 | 迴圈形式 | 路徑 | M×N×K | 比對元素（A、B、C） | 逐位元一致（整數資料） | 界內差異（隨機資料） | Mismatch | 規劃 makespan（cycles） | 輸出區塊 | 實板呼叫／失敗 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| drv_formulas | memref | formulas | 16×8×12 | 1,664 | 832/832 | 188 | 0 | 1,383 | 5 | 20／0 |
+| drv_tables_flat | memref | tables | 16×8×12 | 1,664 | 832/832 | 178 | 0 | 1,383 | 5 | 20／0 |
+| scf_gemm | scf.for | formulas | 16×8×12 | 1,664 | 832/832 | 188 | 0 | 1,383 | 5 | 20／0 |
+| scf_tables_perm | scf.for | tables | 16×8×12 | 1,664 | 832/832 | 182 | 0 | 1,383 | 5 | 20／0 |
+| scf_chain | scf.for | formulas | 16×8×12 + 16×8×8 | 2,432 | 1,216/1,216 | 358 | 0 | 1,383 + 1,117 | 5 + 5 | 40／0 |
+| whl_ne_bigger | scf.while（!=） | formulas | 16×8×12 | 2,268 | 1,134/1,134 | 192 | 0 | 1,383 | 5 | 20／0 |
+| whl_chain | scf.while | formulas | 16×8×12 + 16×8×8 | 2,432 | 1,216/1,216 | 374 | 0 | 1,383 + 1,117 | 5 + 5 | 40／0 |
+| whl_tables_flat | scf.while | tables | 16×8×12 | 1,664 | 832/832 | 164 | 0 | 1,383 | 5 | 20／0 |
+| car_iter | carried（iter_args） | formulas | 16×8×12 | 1,952 | 976/976 | 172 | 0 | 1,383 | 5 | 20／0 |
+| car_tables_while | carried（while） | tables | 16×8×12 | 2,048 | 1,024/1,024 | 168 | 0 | 1,383 | 5 | 20／0 |
+| 合計 | | 6 formulas／4 tables | | 19,452 | 9,726/9,726 | 2,164 | 0 | | | 240／0 |
+
+40/40 次執行 PASS；隨機資料最大偏差為界限的 0.118。8 個執行檔的 DPTI 流量為 22,340／2,368 或 44,680／4,736 位元組（送出／讀回）。反向對照：同一執行檔以不存在的 `SYSTOLIC_FPGA_CONFIG` 執行，送出 0 位元組、20 次呼叫失敗、結果錯誤、結束碼 1。同日研究端 E2E（軟體 Runtime）五組 1,420 次執行 0 失敗；第 17 節的實板 E2E 173/173 PASS、C 程式 16 次 FPGA 執行 2,811 元素逐位元一致。
+
+### 18.5. 限制
+
+- Makespan 與輸出區塊為 pass remark 的規劃值（研究端以 `pipeline-depth=1` 宣告 fleet），不是實板量測；實板 Runtime 的 `PIPELINE_DEPTH=4`。
+- 只驗證上列 10 個函式、16×8×12 與 16×8×8 兩種維度及研究端 driver 的固定種子資料；不代表 records mode 的所有輸入。
+- FPGA 無法回報載入的映像，測試信任最後一次燒錄（第 7 節）。
