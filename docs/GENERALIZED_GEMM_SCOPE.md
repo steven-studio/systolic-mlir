@@ -1257,11 +1257,12 @@ the flat views, the allocated matrices, the two `affine.for` nests of the gather
 scatter) is `materializeTableOperands` and `scatterTableResult` of `MatmulTileLowering`, the
 statements as they were, called as the other branch calls `materializeOperandView`. The file
 includes none of those dialects' headers. Of its object's dependencies (`ninja -t deps`),
-`MemRef.h` is gone; `AffineOps.h`, `Arith.h` and `SymbolTable.h` are still there, not for
-anything the file emits but through the interfaces its walk reads: `AffineMatmulAnalysis.h`
-(a `LogicalMatmul` holds affine operations, and stage 2 is a gate on the GEMMs the affine
-recognizer finds), `NestRecordGate.h` (`arith::FastMathFlags` in one declaration) and
-`mlir/IR/BuiltinOps.h` (`ModuleOp`).
+`MemRef.h` and `Arith.h` are gone: `NestRecordGate.h`, which needs `arith::FastMathFlags` for
+one declaration, includes the header that declares it (`ArithAttributes.h`) and no longer the
+dialect's operations. `AffineOps.h` and `SymbolTable.h` are still there, not for anything the
+file emits but through the interfaces its walk reads: `AffineMatmulAnalysis.h` (a
+`LogicalMatmul` holds affine operations, and stage 2 is a gate on the GEMMs the affine
+recognizer finds) and `mlir/IR/BuiltinOps.h` (`ModuleOp`).
 
 ## The thesis
 

@@ -37,7 +37,7 @@
 #include "Systolic/AffineMatmulAnalysis.h"
 #include "Systolic/NestBinding.h"
 
-#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Arith/IR/ArithAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/StringMap.h"
