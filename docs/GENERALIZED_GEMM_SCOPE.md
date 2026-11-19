@@ -350,7 +350,8 @@ replaces a check of the lowering, and it can only take a lowering away.
 | --- | --- |
 | `include/Systolic/NestBinding.h`, `lib/Systolic/Transforms/NestBinding.cpp` | which loop of which input a record is about. One piece of code, compiled into the pass and into the research tool |
 | `include/Systolic/NestRecordGate.h`, `lib/Systolic/Transforms/NestRecordGate.cpp` | the file of records, the bindings of the module's nests, and the decision for one GEMM |
-| `lib/Systolic/Transforms/AffineMatmulToSystolic.cpp` | the option, and the gated path: one branch at the top of `runOnOperation` |
+| `lib/Systolic/Transforms/AffineMatmulToSystolic.cpp` | the option, and one branch at the top of `runOnOperation` that hands the module over |
+| `include/Systolic/GeneralizedMatmulToSystolic.h`, `lib/Systolic/Transforms/GeneralizedMatmulToSystolic.cpp` | the gated path: the walk of the records mode (in the pass's file until 2026-11-19; see "Where the code is") |
 | `test/Systolic/nest_records.mlir`, `nest_records_refusals.mlir`, `nest_records_belts.mlir`, `Inputs/nest_records*.json`, `Inputs/edit_nest_records.py` | the production tests, and the records they read |
 | `research/generalized-gemm/test/fuzz/nest_gate_records.py` | writes those records from the research tool's output, and checks they are still what it says |
 | `research/generalized-gemm/test/fuzz/nest_e2e.py` | end to end: records, the pass, the FPGA lowering, a run against the software runtime model |
@@ -482,7 +483,8 @@ this runs; `record-driven` without `nest-records` is an error.
 | --- | --- |
 | `include/Systolic/NestRecordLowering.h`, `lib/Systolic/Transforms/NestRecordLowering.cpp` | the nest's own checks, the formulas, the tables |
 | `include/Systolic/NestRecordGate.h`, `lib/Systolic/Transforms/NestRecordGate.cpp` | the record checks split out of stage 2's gate (`checkRecordAtNest`), and the one relaxation the tables need |
-| `lib/Systolic/Transforms/AffineMatmulToSystolic.cpp` | the options `record-driven` and `record-table-budget`, the entry after stage 2's loop, and the emission |
+| `lib/Systolic/Transforms/AffineMatmulToSystolic.cpp` | the options `record-driven` and `record-table-budget` |
+| `lib/Systolic/Transforms/GeneralizedMatmulToSystolic.cpp` | the entry after stage 2's loop, and the emission (in the pass's file until 2026-11-19; see "Where the code is") |
 | `test/Systolic/nest_records_driven.mlir`, `nest_records_driven_refusals.mlir`, `Inputs/nest_records_driven*.json` | the production tests and their records |
 | `research/generalized-gemm/test/fuzz/nest_driven_e2e.py` | end to end: the lowered program run against the software runtime model and compared with the original |
 
@@ -1211,6 +1213,34 @@ other gate mutants (of `NestRecordGate.cpp`, `NestBinding.cpp` and the pass, whi
 line has changed since `acb801a`), the 15 other mutants of the search harness, and the older
 research catalogues but for the mutants named above; sanitized unit binaries; `systolic-cc`
 beyond the production lit suite; cosimulation and the board.
+
+### Where the code is: the records mode in a file of its own (2026-11-19)
+
+Nothing of what the tool does changes with this; it is where things are.
+
+| File | What it holds |
+| --- | --- |
+| `lib/Systolic/Transforms/AffineMatmulToSystolic.cpp` | the pass and its options; the affine pipeline (the steps that rewrite nests, the GEMMs of its recognizer, the general and kernel-coset paths); the dense lowering, `lowerOne`. With `nest-records` it hands the module, its options, its numbering of the GEMMs and `lowerOne` to the records mode, and does nothing else |
+| `include/Systolic/GeneralizedMatmulToSystolic.h`, `lib/Systolic/Transforms/GeneralizedMatmulToSystolic.cpp` | the records mode, stages 2 and 3: the refusal of the pass's other paths, the file of records, the bindings, which nest goes which way and what is said of a nest that is left; and the emission of a GEMM from its record, by the formulas or by the tables. Nests written with `scf.for` or `scf.while` and nests whose loops carry their subscripts come through here; what tells them apart is in the record and in `NestRecordLowering.cpp` |
+| `include/Systolic/MatmulTileLowering.h`, `lib/Systolic/Transforms/MatmulTileLowering.cpp` | what the two lowerings share, one implementation of each: the alias gate, an operand as a logical matrix and its view, the hardware plan's tiles as boxes of the domain, their emission (one numbering of the GEMMs), the write-back. The last three were written out once in each lowering before |
+| `NestRecordGate`, `NestRecordLowering`, `NestBinding` | as they were |
+
+It is not a pass of its own. The mode needs the binding of every nest from the module as the
+input has it, before anything is lowered, and one numbering of the GEMMs across the nests the
+recognizer finds a GEMM in and the nests lowered from their records; two passes one after the
+other would change both, and a second pass would have to declare the dense lowering's options
+again. The options stay the pass's (`nest-records`, `record-driven`, `record-table-budget`), and
+every command line is what it was.
+
+What moved is the text that was there: of the pass file's 3879 lines that are not blank, 3828
+are in the five files as they were, and the rest are the second copy of the three shared steps,
+two `static`s, and the mode's `signalPassFailure(); return;`, now `return failure();`. Checked
+on the split: every `systolic-opt` command of the production lit tests gives the same exit
+code, output and files with the tool before and the tool after (455 commands, 0 different);
+each of the sixteen options the pass hands to the mode, set in turn in every records command,
+gives the same with both tools; the production lit suite, the five end-to-end suites and the
+sanitized tools pass as before; and the eleven mutants of the pass's entry and of the mode are
+killed as before, nine of them now in the new file (`nest_gate_mutation.py`, `R`).
 
 ## The thesis
 

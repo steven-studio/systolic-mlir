@@ -30,7 +30,7 @@ using namespace mlir;
 namespace {
 
 /// The disjointness rule of the production lowering
-/// (AffineMatmulToSystolic.cpp, provablyDisjointFromOutput): views are traced
+/// (MatmulTileLowering.cpp, provablyDisjointFromOutput): views are traced
 /// to the buffer they view; two views of one buffer may overlap; different
 /// buffers are disjoint when one of them is a fresh allocation or a restrict
 /// (llvm.noalias) argument, or when the caller assumes no aliasing.

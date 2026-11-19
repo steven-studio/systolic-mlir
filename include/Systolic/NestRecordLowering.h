@@ -63,7 +63,7 @@
 //             static domain of the nest, which is every run's: nothing is sampled, and nothing
 //             is said of another domain. Tables built at run time are not made.
 //
-// Nothing here changes the IR; AffineMatmulToSystolic.cpp emits the GEMM from the result,
+// Nothing here changes the IR; GeneralizedMatmulToSystolic.cpp emits the GEMM from the result,
 // after its own alias gate and floating-point policy.
 //
 //===----------------------------------------------------------------------===//

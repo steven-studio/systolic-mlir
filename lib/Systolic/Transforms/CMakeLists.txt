@@ -1,5 +1,7 @@
 add_mlir_dialect_library(MLIRSystolicTransforms
   AffineMatmulToSystolic.cpp
+  GeneralizedMatmulToSystolic.cpp
+  MatmulTileLowering.cpp
   AffineMatmulAnalysis.cpp
   NestBinding.cpp
   NestRecordGate.cpp

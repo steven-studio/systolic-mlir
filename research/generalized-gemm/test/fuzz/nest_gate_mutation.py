@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Stages 2 and 3 mutation test (docs/GENERALIZED_GEMM_SCOPE.md): the production gate on records
 of loop nests, and the lowering from records. Each mutant weakens one check of
-lib/Systolic/Transforms/NestRecordGate.cpp, of NestRecordLowering.cpp, of the pass's paths in
-AffineMatmulToSystolic.cpp, or of the binding in NestBinding.cpp, in a copy of the production
+lib/Systolic/Transforms/NestRecordGate.cpp, of NestRecordLowering.cpp, of the pass's entry in
+AffineMatmulToSystolic.cpp, of the records mode and the emission in
+GeneralizedMatmulToSystolic.cpp, or of the binding in NestBinding.cpp, in a copy of the production
 sources built in a scratch directory; the copy unmodified must pass first. The tests are the
 production tests of the gate and of the lowering from records: test/Systolic/nest_records.mlir,
 nest_records_refusals.mlir, nest_records_belts.mlir, nest_records_driven.mlir,
@@ -33,6 +34,7 @@ import sys
 
 G = "lib/Systolic/Transforms/NestRecordGate.cpp"
 P = "lib/Systolic/Transforms/AffineMatmulToSystolic.cpp"
+R = "lib/Systolic/Transforms/GeneralizedMatmulToSystolic.cpp"
 B = "lib/Systolic/Transforms/NestBinding.cpp"
 L = "lib/Systolic/Transforms/NestRecordLowering.cpp"
 
@@ -123,27 +125,28 @@ MUTANTS = [
      "    if (layout.general || layout.roleDim[0] < 0 || layout.roleDim[1] < 0 || type.getRank() != 2 ||\n"
      "        layout.hasBatchTerms(0) || layout.hasBatchTerms(1) || operand.symbolic)\n",
      "    if (false)\n"),
-    # The pass.
+    # The pass's entry (P) and the records mode it hands over to (R).
     ("the option not read", P, "    if (!nestRecords.empty()) {\n      runWithNestRecords();\n",
      "    if (false) {\n      runWithNestRecords();\n"),
-    ("the gate's refusal ignored", P, "      if (!decision.agrees) {\n", "      if (false) {\n"),
-    ("the other paths taken with records", P,
+    ("the gate's refusal ignored", R, "      if (!decision.agrees) {\n", "      if (false) {\n"),
+    ("the other paths taken with records", R,
      "    if (generalAffine || kernelCosetOffload || certifiedOffloadFirst || commonFiberOffload || fpDistribute) {\n",
      "    if (false) {\n"),
-    ("the index width taken as 16", P,
+    ("the index width taken as 16", R,
      "        DataLayout(module).getTypeSizeInBits(IndexType::get(module.getContext())).getFixedValue();\n",
      "        16;\n"),
-    # Stage 3, the pass: the option, the alias gate, the floating-point policy, the emission.
-    ("record-driven not read", P, "    if (recordDriven)\n      module.walk(", "    if (false)\n      module.walk("),
+    # Stage 3: the option (the pass's entry and the mode), the alias gate, the floating-point
+    # policy, the emission.
+    ("record-driven not read", R, "    if (recordDriven)\n      module.walk(", "    if (false)\n      module.walk("),
     ("record-driven taken without records", P, "    if (recordDriven && nestRecords.empty()) {\n", "    if (false) {\n"),
-    ("the alias gate of the lowering from records not read", P,
+    ("the alias gate of the lowering from records not read", R,
      "      if (!provablyDisjointFromOutput(operand, C, assumeNoAlias)) {\n", "      if (false) {\n"),
-    ("the floating-point policy of the lowering from records not read", P,
+    ("the floating-point policy of the lowering from records not read", R,
      "    if (!g.reassoc && !allowFpReassociation) {\n", "    if (false) {\n"),
-    ("the table budget option ignored", P, "*records, bound, loop, indexWidth, recordTableBudget, why);",
+    ("the table budget option ignored", R, "*records, bound, loop, indexWidth, recordTableBudget, why);",
      "*records, bound, loop, indexWidth, mlir::systolic::kDefaultRecordTableBudget, why);"),
-    ("the operands not gathered", P, "        copy(x, /*scatter=*/false);\n", "        (void)x;\n"),
-    ("C not scattered back", P, "      copy(2, /*scatter=*/true);\n", ""),
+    ("the operands not gathered", R, "        copy(x, /*scatter=*/false);\n", "        (void)x;\n"),
+    ("C not scattered back", R, "      copy(2, /*scatter=*/true);\n", ""),
     # Stage 3, the nest's own checks (NestRecordLowering.cpp).
     ("an affine.for with bounds that are no constants or a step read", L,
      "      if (!a.hasConstantLowerBound() || !a.hasConstantUpperBound() || a.getStepAsInt() != 1)\n",

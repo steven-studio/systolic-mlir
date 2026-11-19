@@ -50,13 +50,21 @@
 // accumulation, or allow-fp-reassociation (section 6). Results then equal the
 // loop's exactly when the arithmetic is exact.
 //
+// With nest-records the pass does none of the above itself: that is the records
+// mode (docs/GENERALIZED_GEMM_SCOPE.md, stages 2 and 3), which is
+// GeneralizedMatmulToSystolic.cpp's; this file hands it the options and the
+// dense lowering below (lowerOne) and nothing more. The alias gate, an operand's
+// view, the plan's tiles and their emission, and the write-back are shared with
+// that file: Systolic/MatmulTileLowering.h.
+//
 //===----------------------------------------------------------------------===//
 
 #include "Systolic/AffineMatmulAnalysis.h"
 #include "Systolic/AffineMatmulPartitioning.h"
 #include "Systolic/GeneralAffineMatmul.h"
+#include "Systolic/GeneralizedMatmulToSystolic.h"
 #include "Systolic/KernelCosetLowering.h"
-#include "Systolic/NestRecordGate.h"
+#include "Systolic/MatmulTileLowering.h"
 #include "Systolic/NestRecordLowering.h"
 #include "Systolic/RankPartitionDeviceJobLowering.h"
 #include "Systolic/RankPartitionRecognizedMacAdapter.h"
@@ -74,8 +82,6 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
-#include "mlir/Interfaces/DataLayoutInterfaces.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -84,8 +90,6 @@
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/IntegerSet.h"
 #include "mlir/IR/Matchers.h"
-#include "mlir/Interfaces/FunctionInterfaces.h"
-#include "mlir/Interfaces/ViewLikeInterface.h"
 #include "mlir/Pass/Pass.h"
 
 #include "llvm/ADT/DenseMap.h"
@@ -101,188 +105,6 @@ using namespace mlir;
 using namespace mlir::systolic;
 
 namespace {
-
-/// A function argument the function declares restrict (C `restrict`,
-/// llvm.noalias): nothing else the function sees overlaps the memory it
-/// writes through it.
-static bool isNoAliasArgument(Value memref) {
-  auto arg = dyn_cast<BlockArgument>(memref);
-  if (!arg || !arg.getOwner()->isEntryBlock())
-    return false;
-  auto fn = dyn_cast<FunctionOpInterface>(arg.getOwner()->getParentOp());
-  return fn && fn.getArgAttr(arg.getArgNumber(),
-                             LLVM::LLVMDialect::getNoAliasAttrName());
-}
-
-static bool isFreshAllocation(Value memref) {
-  return memref.getDefiningOp<memref::AllocOp>() ||
-         memref.getDefiningOp<memref::AllocaOp>();
-}
-
-/// The buffer a memref is a view of (through subview, cast, reshapes, ...).
-static Value getViewRoot(Value memref) {
-  while (auto view = memref.getDefiningOp<ViewLikeOpInterface>())
-    memref = view.getViewSource();
-  return memref;
-}
-
-/// Whether `input` provably does not overlap `output`, the memref the GEMM
-/// writes. The loop nest reads A and B while it writes C; the tiles read all
-/// of A and B before writing back, so overlapping memory would change the
-/// result. Views are traced to the buffer they view: two views of one buffer
-/// may overlap; different buffers are disjoint when one of them is a fresh
-/// allocation or a restrict argument.
-static bool provablyDisjointFromOutput(Value input, Value output,
-                                       bool assumeNoAlias) {
-  if (input == output)
-    return false;
-  if (assumeNoAlias)
-    return true;
-  Value inputRoot = getViewRoot(input);
-  Value outputRoot = getViewRoot(output);
-  if (inputRoot == outputRoot)
-    return false;
-  if (isFreshAllocation(inputRoot) || isFreshAllocation(outputRoot))
-    return true;
-  return isNoAliasArgument(outputRoot) || isNoAliasArgument(inputRoot);
-}
-
-/// The logical matrix an operand holds (docs/AFFINE_GEMM_MAPPING.md §5, §19):
-/// its two GEMM roles (rows, columns) in GEMM order. Two forms:
-///
-///  * A role-pure layout (§5): each role read in one memref dimension at
-///    index alpha + rho * ordinal, rho of either sign (a negative rho is a
-///    view that runs backwards: its origin is the largest index of that
-///    dimension); every other dimension at a fixed index. Built as a
-///    rank-reducing memref.subview of the memref (signed strides), then
-///    memref.transpose when the operand stores the roles in the other order,
-///    then memref.expand_shape for a role of extent one the operand has no
-///    dimension for.
-///  * An explicit view (§19.11): the element address of the view's element
-///    (row r, column c) is elementOffset + elementStrides[0] r +
-///    elementStrides[1] c (+ the batch terms per batch iteration), built as
-///    one memref.reinterpret_cast of the memref to rows x columns. Used for
-///    the general layouts of §19 (a dimension combining both of an operand's
-///    roles -- A[i][i + k] --, a role across several dimensions, a flat
-///    C[4i + j], a Hankel A[i + k]), whose address IS affine in (row, column)
-///    although no dimension of the memref holds one role alone, and for a
-///    role-pure view whose rank-reduced subview type would be ambiguous
-///    (a kept dimension of size one next to a dropped one: the verifier
-///    cannot tell which was dropped).
-///
-/// Every element of the view is an element the loop nest itself accesses;
-/// for C the view is injective (G2), for A and B it may repeat elements.
-struct LogicalOperand {
-  Value memref;
-  // The subview, over every dimension of the memref.
-  SmallVector<int64_t> offsets, sizes, strides;
-  // The memref dimension of each role, -1 for none (a unit dimension).
-  std::array<int, 2> roleDim{-1, -1};
-  // The view's shape: the roles' extents.
-  std::array<int64_t, 2> shape{1, 1};
-  // Per memref dimension, the batch loops' coefficients (the layout's
-  // batchCoefficients): the dimension's offset is offsets[d] plus these
-  // terms of the enclosing batch loops' counters -- a dynamic offset,
-  // computed per batch iteration (ISSUE-006, ISSUE-007).
-  SmallVector<SmallVector<int64_t>> batchCoefficients;
-  // The explicit view: element offset, element strides of (rows, columns),
-  // and per source loop the batch loops' coefficients on the element offset
-  // (the dimensions' batch terms times the memref's row-major strides).
-  bool explicitView = false;
-  int64_t elementOffset = 0;
-  std::array<int64_t, 2> elementStrides{1, 1};
-  SmallVector<int64_t> elementBatchCoefficients;
-  // Per memref dimension, the run-time offset the access adds through the
-  // nest's symbols (LogicalMatmul::symbolicA/B/C: C[r0 + i][j] offsets the
-  // rows by the parameter r0), as a map of no dims over `symbols` -- a
-  // "dynamic offset" of another kind than the batch terms: the view is
-  // taken at run time, offset by the symbols' values. Null when the access
-  // has none.
-  AffineMap symbolic;
-  SmallVector<Value> symbols;
-
-  bool hasSymbolicOffset(unsigned d) const {
-    if (!symbolic || d >= symbolic.getNumResults())
-      return false;
-    AffineExpr e = symbolic.getResult(d);
-    return !isa<AffineConstantExpr>(e) ||
-           cast<AffineConstantExpr>(e).getValue() != 0;
-  }
-  bool hasSymbolicOffsets() const {
-    for (unsigned d = 0, n = symbolic ? symbolic.getNumResults() : 0; d < n; ++d)
-      if (hasSymbolicOffset(d))
-        return true;
-    return false;
-  }
-  bool hasBatchTerms() const {
-    if (explicitView)
-      return llvm::any_of(elementBatchCoefficients,
-                          [](int64_t v) { return v != 0; });
-    return llvm::any_of(batchCoefficients, [](const SmallVector<int64_t> &c) {
-      return llvm::any_of(c, [](int64_t v) { return v != 0; });
-    });
-  }
-  bool isWholeMemref() const {
-    if (explicitView)
-      return false;
-    auto ty = cast<MemRefType>(memref.getType());
-    return ty.getRank() == 2 && ty.hasStaticShape() && roleDim[0] == 0 &&
-           roleDim[1] == 1 && offsets[0] == 0 && offsets[1] == 0 &&
-           strides[0] == 1 && strides[1] == 1 &&
-           sizes[0] == ty.getDimSize(0) && sizes[1] == ty.getDimSize(1) &&
-           !hasBatchTerms() && !hasSymbolicOffsets();
-  }
-  bool sameView(const LogicalOperand &other) const {
-    if (memref != other.memref || explicitView != other.explicitView ||
-        shape != other.shape || symbolic != other.symbolic ||
-        symbols != other.symbols)
-      return false;
-    if (explicitView)
-      return elementOffset == other.elementOffset &&
-             elementStrides == other.elementStrides &&
-             elementBatchCoefficients == other.elementBatchCoefficients;
-    return offsets == other.offsets && sizes == other.sizes &&
-           strides == other.strides && roleDim == other.roleDim &&
-           batchCoefficients == other.batchCoefficients;
-  }
-  bool isTransposed() const {
-    return !explicitView && roleDim[0] >= 0 && roleDim[1] >= 0 &&
-           roleDim[0] > roleDim[1];
-  }
-};
-
-/// `expr` (over `symbols`, no dims) plus `constant`, as index arithmetic at
-/// the builder's point: the run-time offset of a view dimension. A bare
-/// symbol with no constant is the symbol's value itself.
-static Value materializeOffset(OpBuilder &builder, Location loc,
-                               AffineExpr expr, ArrayRef<Value> symbols,
-                               int64_t constant) {
-  std::function<Value(AffineExpr)> build = [&](AffineExpr e) -> Value {
-    if (auto c = dyn_cast<AffineConstantExpr>(e))
-      return arith::ConstantIndexOp::create(builder, loc, c.getValue());
-    if (auto sym = dyn_cast<AffineSymbolExpr>(e))
-      return symbols[sym.getPosition()];
-    auto bin = cast<AffineBinaryOpExpr>(e);
-    Value lhs = build(bin.getLHS()), rhs = build(bin.getRHS());
-    switch (e.getKind()) {
-    case AffineExprKind::Add:
-      return arith::AddIOp::create(builder, loc, lhs, rhs);
-    case AffineExprKind::Mul:
-      return arith::MulIOp::create(builder, loc, lhs, rhs);
-    default:
-      // separateSymbols refuses floordiv, ceildiv and mod. Not
-      // llvm_unreachable: in a build without assertions that is undefined
-      // behaviour, which once lowered s0 floordiv 2 as s0 * 2.
-      llvm::report_fatal_error(
-          "materializeOffset: a symbolic offset that is not a sum of products");
-    }
-  };
-  Value v = build(expr);
-  if (constant != 0)
-    v = arith::AddIOp::create(
-        builder, loc, v, arith::ConstantIndexOp::create(builder, loc, constant));
-  return v;
-}
 
 static FailureOr<LogicalOperand>
 getLogicalOperand(Value memref, const LogicalMatmul &matmul,
@@ -697,169 +519,6 @@ getLogicalOperand(Value memref, const LogicalMatmul &matmul,
     }
   }
   return operand;
-}
-
-/// The operand's rank-2 view (rows x columns of the GEMM), on `builder`;
-/// `batchIVs` are the counters of the enclosing batch loops, which re-emit
-/// the nest's loops `batchLoops` (same order). A dimension with batch terms
-/// is read at its static offset plus those terms of the counters -- one
-/// affine.apply per such dimension, a dynamic offset of the subview. An
-/// explicit view is one memref.reinterpret_cast: element offset (static, or
-/// one affine.apply of the batch counters), sizes, element strides.
-static Value materializeOperandView(OpBuilder &builder, Location loc,
-                                    const LogicalOperand &operand,
-                                    ArrayRef<Value> batchIVs,
-                                    ArrayRef<unsigned> batchLoops,
-                                    llvm::DenseMap<AffineMap, Value> &applies) {
-  if (operand.isWholeMemref())
-    return operand.memref;
-  auto sourceTy = cast<MemRefType>(operand.memref.getType());
-  if (operand.explicitView) {
-    MLIRContext *ctx = builder.getContext();
-    OpFoldResult offset = builder.getIndexAttr(operand.elementOffset);
-    int64_t layoutOffset = operand.elementOffset;
-    AffineExpr expr = getAffineConstantExpr(operand.elementOffset, ctx);
-    bool batched = false;
-    for (auto [j, s] : llvm::enumerate(batchLoops)) {
-      const int64_t coefficient =
-          s < operand.elementBatchCoefficients.size()
-              ? operand.elementBatchCoefficients[s]
-              : 0;
-      if (coefficient == 0)
-        continue;
-      expr = expr + getAffineDimExpr(j, ctx) * coefficient;
-      batched = true;
-    }
-    if (batched) {
-      AffineMap map = AffineMap::get(batchIVs.size(), /*symbolCount=*/0, expr);
-      Value &index = applies[map];
-      if (!index)
-        index = affine::AffineApplyOp::create(builder, loc, map, batchIVs)
-                    .getResult();
-      offset = index;
-      layoutOffset = ShapedType::kDynamic;
-    }
-    // The symbols' terms on the element offset: per dimension with a
-    // run-time offset, its term times the memref's row-major stride.
-    if (operand.hasSymbolicOffsets()) {
-      SmallVector<int64_t> rowMajor(sourceTy.getRank(), 1);
-      for (int64_t d = sourceTy.getRank() - 2; d >= 0; --d)
-        rowMajor[d] = rowMajor[d + 1] * sourceTy.getDimSize(d + 1);
-      Value sum = batched ? cast<Value>(offset)
-                          : arith::ConstantIndexOp::create(
-                                builder, loc, operand.elementOffset);
-      for (int64_t d = 0; d < sourceTy.getRank(); ++d) {
-        if (!operand.hasSymbolicOffset(d))
-          continue;
-        Value term = materializeOffset(builder, loc,
-                                       operand.symbolic.getResult(d),
-                                       operand.symbols, /*constant=*/0);
-        if (rowMajor[d] != 1)
-          term = arith::MulIOp::create(
-              builder, loc, term,
-              arith::ConstantIndexOp::create(builder, loc, rowMajor[d]));
-        sum = arith::AddIOp::create(builder, loc, sum, term);
-      }
-      offset = sum;
-      layoutOffset = ShapedType::kDynamic;
-    }
-    SmallVector<int64_t> viewShape(operand.shape.begin(), operand.shape.end());
-    SmallVector<int64_t> viewStrides(operand.elementStrides.begin(),
-                                     operand.elementStrides.end());
-    auto viewTy = MemRefType::get(
-        viewShape, sourceTy.getElementType(),
-        StridedLayoutAttr::get(ctx, layoutOffset, viewStrides),
-        sourceTy.getMemorySpace());
-    SmallVector<OpFoldResult> sizes, strides;
-    for (unsigned r = 0; r < 2; ++r) {
-      sizes.push_back(builder.getIndexAttr(viewShape[r]));
-      strides.push_back(builder.getIndexAttr(viewStrides[r]));
-    }
-    return memref::ReinterpretCastOp::create(builder, loc, viewTy,
-                                             operand.memref, offset, sizes,
-                                             strides);
-  }
-  // The subview keeps the role dimensions (in memref order), drops the rest.
-  SmallVector<int64_t> keptShape;
-  SmallVector<int> kept;
-  for (int64_t d = 0; d < sourceTy.getRank(); ++d)
-    if (d == operand.roleDim[0] || d == operand.roleDim[1]) {
-      kept.push_back(d);
-      keptShape.push_back(operand.sizes[d]);
-    }
-  SmallVector<OpFoldResult> offsets, sizes, strides;
-  for (int64_t d = 0; d < sourceTy.getRank(); ++d) {
-    offsets.push_back(builder.getIndexAttr(operand.offsets[d]));
-    sizes.push_back(builder.getIndexAttr(operand.sizes[d]));
-    strides.push_back(builder.getIndexAttr(operand.strides[d]));
-  }
-  for (int64_t d = 0; d < sourceTy.getRank(); ++d) {
-    if (size_t(d) >= operand.batchCoefficients.size())
-      continue;
-    AffineExpr expr =
-        getAffineConstantExpr(operand.offsets[d], builder.getContext());
-    bool batched = false;
-    for (auto [j, s] : llvm::enumerate(batchLoops)) {
-      const int64_t coefficient = operand.batchCoefficients[d][s];
-      if (coefficient == 0)
-        continue;
-      expr = expr + getAffineDimExpr(j, builder.getContext()) * coefficient;
-      batched = true;
-    }
-    if (!batched)
-      continue;
-    // One dimension per batch loop, whether or not this offset uses it (the
-    // map's dimension count must match the operands).
-    // Operands that read the batch coordinate through the same expression
-    // share one index (the batch loops' counters are the same values).
-    AffineMap map = AffineMap::get(batchIVs.size(), /*symbolCount=*/0, expr);
-    Value &index = applies[map];
-    if (!index)
-      index =
-          affine::AffineApplyOp::create(builder, loc, map, batchIVs).getResult();
-    offsets[d] = index;
-  }
-  // A dimension the nest's symbols offset: the static offset (or the batch
-  // terms' affine.apply, which already holds it) plus the symbols' term,
-  // as index arithmetic -- a dynamic offset of the subview (a bare symbol
-  // with no static part is the symbol's value itself).
-  for (int64_t d = 0; d < sourceTy.getRank(); ++d) {
-    if (!operand.hasSymbolicOffset(d))
-      continue;
-    AffineExpr expr = operand.symbolic.getResult(d);
-    if (auto base = dyn_cast<Value>(offsets[d])) {
-      Value term = materializeOffset(builder, loc, expr, operand.symbols,
-                                     /*constant=*/0);
-      offsets[d] = arith::AddIOp::create(builder, loc, base, term).getResult();
-    } else {
-      offsets[d] = materializeOffset(builder, loc, expr, operand.symbols,
-                                     operand.offsets[d]);
-    }
-  }
-  MemRefType subviewTy = memref::SubViewOp::inferRankReducedResultType(
-      keptShape, sourceTy, offsets, sizes, strides);
-  Value view = memref::SubViewOp::create(builder, loc, subviewTy,
-                                         operand.memref, offsets, sizes,
-                                         strides);
-  // The roles in the other order: swap the two dimensions.
-  if (operand.isTransposed()) {
-    AffineMap swap = AffineMap::getPermutationMap(ArrayRef<unsigned>{1, 0},
-                                                  builder.getContext());
-    view = memref::TransposeOp::create(builder, loc, view,
-                                       AffineMapAttr::get(swap));
-  }
-  // A role the operand has no dimension for: a unit dimension in its place
-  // (both roles: an operand of batch dimensions only, a rank-0 view, becomes
-  // the 1 x 1 matrix).
-  if (kept.size() < 2) {
-    SmallVector<int64_t> shape(operand.shape.begin(), operand.shape.end());
-    SmallVector<ReassociationIndices> reassociation;
-    if (kept.size() == 1)
-      reassociation.push_back(ReassociationIndices{0, 1});
-    view = memref::ExpandShapeOp::create(builder, loc, shape, view,
-                                         reassociation);
-  }
-  return view;
 }
 
 /// The value of an affine expression at constant dims (no symbols), in
@@ -2773,35 +2432,10 @@ struct AffineMatmulToSystolicPass
     // ------------------------------------------------------------------
     std::optional<SystolicTilePlan> plan;
     SmallVector<LogicalBox> boxes;
-    if (!fleet.resources.empty()) {
-      SystolicOptimizerOptions options;
-      options.sharedReadBytesPerCycle = sharedReadBytesPerCycle;
-      if (!parseCostModelVersion(costModel, options.costModel) ||
-          (operandPath != "v1" && operandPath != "v2")) {
-        why = "cost-model and operand-path must each be v1 or v2";
-        hardError = true;
-        return failure();
-      }
-      options.beatWideOperandPath = operandPath == "v2";
-      FailureOr<SystolicTilePlan> planned =
-          planSystolicMatmul(anchor, M, N, K, fleet, options);
-      if (failed(planned)) {
-        hardError = true;
-        return failure();
-      }
-      plan = std::move(*planned);
-      for (const SystolicTileBlock &block : plan->blocks)
-        for (const SystolicTileInvocation &inv : block.invocations) {
-          LogicalBox box;
-          box.lower = {block.row, block.column, inv.k0};
-          box.extent = {block.m, block.n, inv.k};
-          boxes.push_back(box);
-        }
-    } else {
-      LogicalBox whole;
-      whole.extent = dense->extent;
-      boxes.push_back(whole);
-    }
+    if (failed(planMatmulTiles(anchor, M, N, K, fleet, sharedReadBytesPerCycle,
+                               costModel, operandPath, plan, boxes, why,
+                               hardError)))
+      return failure();
 
     auto partitions = partitionLogicalMatmul(matmul, boxes, &why);
     if (failed(partitions)) {
@@ -2960,22 +2594,10 @@ struct AffineMatmulToSystolicPass
     }
     Value cTensor = asTensor(cView, *out, /*writable=*/true);
 
-    Value result;
-    if (plan) {
-      result = emitSystolicTilePlan(builder, loc, aTensor, bTensor, cTensor,
-                                    *plan, fleet, nextGemmIndex++);
-    } else {
-      result = MatmulTileOp::create(
-          builder, loc, cTensor.getType(), aTensor, bTensor, cTensor,
-          builder.getI64IntegerAttr(M), builder.getI64IntegerAttr(N),
-          builder.getI64IntegerAttr(K), /*device=*/FlatSymbolRefAttr(),
-          /*est_cycles=*/IntegerAttr(), /*start_cycle=*/IntegerAttr());
-    }
+    Value result = emitMatmulTiles(builder, loc, aTensor, bTensor, cTensor, M, N,
+                                   K, plan, fleet, nextGemmIndex);
 
-    auto writeBack = bufferization::MaterializeInDestinationOp::create(
-        builder, loc, result, cView);
-    writeBack.setRestrict(true);
-    writeBack.setWritable(true);
+    writeBackMatmulResult(builder, loc, result, cView);
 
     if (report) {
       auto remark = anchor->emitRemark()
@@ -3129,365 +2751,37 @@ struct AffineMatmulToSystolicPass
     m.anchor->erase();
     return success();
   }
-  /// Stage 3 of docs/GENERALIZED_GEMM_SCOPE.md: the GEMM of a nest the recognizer found no
-  /// GEMM in, from its record (Systolic/NestRecordLowering.h). The alias gate, the
-  /// floating-point policy and the plan are the dense path's; the operands are views of their
-  /// memrefs by the record's formulas, or matrices gathered by the tables and C scattered back.
-  LogicalResult lowerRecordDriven(const RecordDrivenGemm &g, const SystolicFleet &fleet,
-                                  std::string &why, bool &hardError) {
-    Operation *anchor = g.anchor;
-    const int64_t M = g.M, N = g.N, K = g.K;
-    const std::array<std::array<int64_t, 2>, 3> shapeOf = {{{M, K}, {K, N}, {M, N}}};
-    Value A = g.operands[0].memref, B = g.operands[1].memref, C = g.operands[2].memref;
-    Type elementType = cast<MemRefType>(C.getType()).getElementType();
-
-    for (auto [operand, name] : {std::pair{A, "A"}, std::pair{B, "B"}}) {
-      if (!provablyDisjointFromOutput(operand, C, assumeNoAlias)) {
-        why = (llvm::Twine(name) +
-               " may overlap C; declare the arguments llvm.noalias (C restrict) or pass "
-               "assume-no-alias")
-                  .str();
-        return failure();
-      }
-    }
-    if (!g.reassoc && !allowFpReassociation) {
-      why = "floating-point reassociation is not permitted: the systolic execution sums each "
-            "tile from zero and adds the sum to C, a different order of IEEE additions than "
-            "the loop's (mark the accumulation reassoc, or pass allow-fp-reassociation)";
-      return failure();
-    }
-
-    std::optional<SystolicTilePlan> plan;
-    SmallVector<LogicalBox> boxes;
-    if (!fleet.resources.empty()) {
-      SystolicOptimizerOptions options;
-      options.sharedReadBytesPerCycle = sharedReadBytesPerCycle;
-      if (!parseCostModelVersion(costModel, options.costModel) ||
-          (operandPath != "v1" && operandPath != "v2")) {
-        why = "cost-model and operand-path must each be v1 or v2";
-        hardError = true;
-        return failure();
-      }
-      options.beatWideOperandPath = operandPath == "v2";
-      FailureOr<SystolicTilePlan> planned = planSystolicMatmul(anchor, M, N, K, fleet, options);
-      if (failed(planned)) {
-        hardError = true;
-        return failure();
-      }
-      plan = std::move(*planned);
-      for (const SystolicTileBlock &block : plan->blocks)
-        for (const SystolicTileInvocation &inv : block.invocations) {
-          LogicalBox box;
-          box.lower = {block.row, block.column, inv.k0};
-          box.extent = {block.m, block.n, inv.k};
-          boxes.push_back(box);
-        }
-    } else {
-      LogicalBox whole;
-      whole.extent = {M, N, K};
-      boxes.push_back(whole);
-    }
-    // The tiles are an exact partition of the box: inside it, pairwise disjoint, and as many
-    // points as it has (a domain counted from 0 along I, J and K).
-    {
-      const std::array<int64_t, 3> extent{M, N, K};
-      std::optional<int64_t> volume = int64_t(0);
-      for (auto [b, box] : llvm::enumerate(boxes)) {
-        for (unsigned a = 0; a < 3; ++a)
-          if (box.lower[a] < 0 || box.extent[a] <= 0 || box.lower[a] + box.extent[a] > extent[a]) {
-            why = "the partition is not exact: a tile leaves the box";
-            return failure();
-          }
-        for (unsigned o = 0; o < b; ++o) {
-          bool apart = false;
-          for (unsigned a = 0; a < 3; ++a)
-            apart = apart || boxes[o].lower[a] + boxes[o].extent[a] <= box.lower[a] ||
-                    box.lower[a] + box.extent[a] <= boxes[o].lower[a];
-          if (!apart) {
-            why = "the partition is not exact: two tiles overlap";
-            return failure();
-          }
-        }
-        std::optional<int64_t> v = llvm::checkedMul(box.extent[0], box.extent[1]);
-        v = v ? llvm::checkedMul(*v, box.extent[2]) : std::nullopt;
-        volume = volume && v ? llvm::checkedAdd(*volume, *v) : std::nullopt;
-      }
-      std::optional<int64_t> whole = llvm::checkedMul(M, N);
-      whole = whole ? llvm::checkedMul(*whole, K) : std::nullopt;
-      if (!volume || !whole || *volume != *whole) {
-        why = "the partition is not exact: the tiles do not cover the box";
-        return failure();
-      }
-    }
-
-    // ------------------------------------------------------------------
-    // Materialize. Every check is done; from here on the nest is replaced.
-    // ------------------------------------------------------------------
-    OpBuilder builder(anchor);
-    Location loc = anchor->getLoc();
-    auto asTensor = [&](Value memref, ArrayRef<int64_t> shape, bool writable) -> Value {
-      auto ty = RankedTensorType::get(shape, elementType);
-      return bufferization::ToTensorOp::create(builder, loc, ty, memref,
-                                               /*restrict=*/true, writable);
-    };
-    auto runTiles = [&](Value aTensor, Value bTensor, Value cTensor) -> Value {
-      if (plan)
-        return emitSystolicTilePlan(builder, loc, aTensor, bTensor, cTensor, *plan, fleet,
-                                    nextGemmIndex++);
-      return MatmulTileOp::create(builder, loc, cTensor.getType(), aTensor, bTensor, cTensor,
-                                  builder.getI64IntegerAttr(M), builder.getI64IntegerAttr(N),
-                                  builder.getI64IntegerAttr(K), /*device=*/FlatSymbolRefAttr(),
-                                  /*est_cycles=*/IntegerAttr(), /*start_cycle=*/IntegerAttr());
-    };
-
-    if (!g.tables) {
-      // The record's formulas: each operand a view of its memref.
-      std::array<LogicalOperand, 3> operand;
-      for (unsigned x = 0; x < 3; ++x) {
-        const DrivenOperand &d = g.operands[x];
-        const unsigned rank = cast<MemRefType>(d.memref.getType()).getRank();
-        LogicalOperand &o = operand[x];
-        o.memref = d.memref;
-        o.offsets.assign(rank, 0);
-        o.sizes.assign(rank, 1);
-        o.strides.assign(rank, 1);
-        if (d.explicitView) {
-          o.explicitView = true;
-          o.roleDim = {-1, -1};
-          o.elementOffset = d.elementOffset;
-          o.elementStrides = d.elementStrides;
-          o.shape = shapeOf[x];
-          continue;
-        }
-        for (auto [dim, dd] : llvm::enumerate(d.dimensions)) {
-          o.roleDim[dd.role] = dim;
-          o.offsets[dim] = dd.offset;
-          o.sizes[dim] = shapeOf[x][dd.role];
-          o.strides[dim] = dd.scale;
-        }
-        o.shape = shapeOf[x];
-      }
-      llvm::DenseMap<AffineMap, Value> applies;
-      auto view = [&](const LogicalOperand &o) -> Value {
-        return materializeOperandView(builder, loc, o, {}, {}, applies);
-      };
-      const bool sharedInput = operand[0].sameView(operand[1]);
-      Value aTensor = asTensor(view(operand[0]), operand[0].shape, /*writable=*/false);
-      Value bTensor = sharedInput ? aTensor
-                                  : asTensor(view(operand[1]), operand[1].shape, /*writable=*/false);
-      Value cView = view(operand[2]);
-      Value cTensor = asTensor(cView, operand[2].shape, /*writable=*/true);
-      Value result = runTiles(aTensor, bTensor, cTensor);
-      auto writeBack = bufferization::MaterializeInDestinationOp::create(builder, loc, result, cView);
-      writeBack.setRestrict(true);
-      writeBack.setWritable(true);
-    } else {
-      // The tables: constant globals of element offsets; A, B and C gathered into matrices,
-      // the tiles on those, C scattered back.
-      ModuleOp module = getOperation();
-      MLIRContext *ctx = builder.getContext();
-      auto symbolName = [&](StringRef base) {
-        std::string name = base.str();
-        for (unsigned n = 1; SymbolTable::lookupSymbolIn(module, name); ++n)
-          name = base.str() + "_" + std::to_string(n);
-        return name;
-      };
-      std::string stem = "__nest_table_" + g.where;
-      for (char &ch : stem)
-        if (!llvm::isAlnum(ch) && ch != '_')
-          ch = '_';
-      std::array<Value, 3> table, flat, matrix;
-      static const char *const kName[] = {"A", "B", "C"};
-      for (unsigned x = 0; x < 3; ++x) {
-        auto tableTy = MemRefType::get(shapeOf[x], builder.getI64Type());
-        auto values = DenseElementsAttr::get(RankedTensorType::get(shapeOf[x], builder.getI64Type()),
-                                             ArrayRef<int64_t>(g.operands[x].table));
-        std::string name = symbolName(stem + "_" + kName[x]);
-        {
-          OpBuilder::InsertionGuard guard(builder);
-          builder.setInsertionPointToStart(module.getBody());
-          memref::GlobalOp::create(builder, loc, name, builder.getStringAttr("private"), tableTy,
-                                   values, /*constant=*/true, /*alignment=*/IntegerAttr());
-        }
-        table[x] = memref::GetGlobalOp::create(builder, loc, tableTy, name);
-        auto memTy = cast<MemRefType>(g.operands[x].memref.getType());
-        const int64_t elements = memTy.getNumElements();
-        auto flatTy = MemRefType::get({elements}, elementType);
-        flat[x] = memref::ReinterpretCastOp::create(
-            builder, loc, flatTy, g.operands[x].memref, /*offset=*/builder.getIndexAttr(0),
-            ArrayRef<OpFoldResult>{builder.getIndexAttr(elements)},
-            ArrayRef<OpFoldResult>{builder.getIndexAttr(1)});
-        matrix[x] = memref::AllocOp::create(builder, loc, MemRefType::get(shapeOf[x], elementType));
-      }
-      (void)ctx;
-      // matrix[x][r][c] = operand x at table[x][r][c], or the reverse for the scatter.
-      auto copy = [&](unsigned x, bool scatter) {
-        auto rows = affine::AffineForOp::create(builder, loc, 0, shapeOf[x][0], 1);
-        OpBuilder::InsertionGuard guard(builder);
-        builder.setInsertionPointToStart(rows.getBody());
-        auto columns = affine::AffineForOp::create(builder, loc, 0, shapeOf[x][1], 1);
-        builder.setInsertionPointToStart(columns.getBody());
-        SmallVector<Value, 2> rc{rows.getInductionVar(), columns.getInductionVar()};
-        Value offset64 = affine::AffineLoadOp::create(builder, loc, table[x], rc);
-        Value offset = arith::IndexCastOp::create(builder, loc, builder.getIndexType(), offset64);
-        if (!scatter) {
-          Value v = memref::LoadOp::create(builder, loc, flat[x], ValueRange{offset});
-          affine::AffineStoreOp::create(builder, loc, v, matrix[x], rc);
-        } else {
-          Value v = affine::AffineLoadOp::create(builder, loc, matrix[x], rc);
-          memref::StoreOp::create(builder, loc, v, flat[x], ValueRange{offset});
-        }
-      };
-      for (unsigned x = 0; x < 3; ++x)
-        copy(x, /*scatter=*/false);
-      Value aTensor = asTensor(matrix[0], shapeOf[0], /*writable=*/false);
-      Value bTensor = asTensor(matrix[1], shapeOf[1], /*writable=*/false);
-      Value cTensor = asTensor(matrix[2], shapeOf[2], /*writable=*/true);
-      Value result = runTiles(aTensor, bTensor, cTensor);
-      auto writeBack = bufferization::MaterializeInDestinationOp::create(builder, loc, result, matrix[2]);
-      writeBack.setRestrict(true);
-      writeBack.setWritable(true);
-      copy(2, /*scatter=*/true);
-      // No dealloc: --systolic-runtime-to-llvm's buffer deallocation frees the three matrices
-      // (an explicit dealloc of a buffer given to to_tensor is refused there).
-    }
-
-    if (report) {
-      auto remark = anchor->emitRemark()
-                    << "GEMM " << M << "x" << N << "x" << K << " of " << g.where
-                    << " lowered from its record as " << boxes.size() << " exact region(s) ("
-                    << g.summary << ")";
-      if (plan)
-        remark << " on " << fleet.resources.size()
-               << " accelerator(s): makespan = " << plan->optimization.makespan
-               << " cycles (read + compute + write), " << plan->blocks.size()
-               << " output block(s)";
-    }
-    anchor->erase();
-    return success();
-  }
-
-  /// Stage 2 of docs/GENERALIZED_GEMM_SCOPE.md: the dense path, gated by the records of
-  /// nest-records (Systolic/NestRecordGate.h). A record is about a nest as the input has
-  /// it, so nothing rewrites a nest before its gate: the steps that do (last-write-wins,
-  /// the untiling of written tilings, the normalization of parallelotope domains, the
-  /// hoisting of repetition loops) are not run, and neither are the paths that read no
-  /// records. Each GEMM that passes its gate is lowered by lowerOne, with every check it
-  /// makes without records, where it stands and in program order.
+  /// With nest-records (docs/GENERALIZED_GEMM_SCOPE.md, stages 2 and 3): the records mode,
+  /// which is GeneralizedMatmulToSystolic.cpp's. The pass hands over its options, its
+  /// numbering of the GEMMs and its dense lowering (lowerOne, for a GEMM this pass's
+  /// recognizer finds and the records admit), and fails when the mode does. Nothing of the
+  /// mode is decided here.
   void runWithNestRecords() {
-    ModuleOp module = getOperation();
-    if (generalAffine || kernelCosetOffload || certifiedOffloadFirst || commonFiberOffload || fpDistribute) {
-      module.emitError() << "affine-matmul-to-systolic: nest-records is read on the dense path "
-                            "only; general-affine, kernel-coset-offload, certified-offload-first, "
-                            "common-fiber-offload and fp-distribute take other paths, which read "
-                            "no records";
+    GeneralizedMatmulOptions options;
+    options.nestRecords = nestRecords.getValue();
+    options.recordDriven = recordDriven;
+    options.recordTableBudget = recordTableBudget;
+    options.assumeNoAlias = assumeNoAlias;
+    options.allowFpReassociation = allowFpReassociation;
+    options.sharedReadBytesPerCycle = sharedReadBytesPerCycle;
+    options.costModel = costModel.getValue();
+    options.operandPath = operandPath.getValue();
+    options.reductionBatches = reductionBatches;
+    options.classify = classify;
+    options.report = report;
+    options.generalAffine = generalAffine;
+    options.kernelCosetOffload = kernelCosetOffload;
+    options.certifiedOffloadFirst = certifiedOffloadFirst;
+    options.commonFiberOffload = commonFiberOffload;
+    options.fpDistribute = fpDistribute;
+    auto dense = [&](const LogicalMatmul &matmul, const SystolicFleet &fleet,
+                     std::string &why, GemmMappingClass &mappingClass,
+                     bool &hardError) {
+      return lowerOne(matmul, fleet, why, mappingClass, hardError);
+    };
+    if (failed(runGeneralizedMatmulToSystolic(getOperation(), options,
+                                              nextGemmIndex, dense)))
       signalPassFailure();
-      return;
-    }
-    FailureOr<SystolicFleet> fleet = collectSystolicFleet(module);
-    if (failed(fleet)) {
-      signalPassFailure();
-      return;
-    }
-    std::string error;
-    FailureOr<mlir::systolic::NestRecordFile> records =
-        mlir::systolic::NestRecordFile::load(nestRecords, error);
-    if (failed(records)) {
-      module.emitError() << "affine-matmul-to-systolic: nest-records: " << error;
-      signalPassFailure();
-      return;
-    }
-    const unsigned indexWidth =
-        DataLayout(module).getTypeSizeInBits(IndexType::get(module.getContext())).getFixedValue();
-    // Every outermost loop's binding, before anything is lowered.
-    const mlir::systolic::BoundNests bound(module);
-    nextGemmIndex = nextSystolicGemmIndex(module);
-
-    SmallVector<AffineMatmulCandidate> candidates;
-    collectAffineMatmulCandidates(module.getOperation(), candidates);
-    SmallVector<LogicalMatmul, 1> matmuls;
-    for (AffineMatmulCandidate candidate : candidates) {
-      AffineMatmulRecognitionOptions recognition;
-      recognition.countersAsWritten = true;
-      recognition.reductionBatches = reductionBatches;
-      std::string notRecognized;
-      GemmMappingClass notRecognizedClass = GemmMappingClass::ProvenInvalid;
-      auto result = recognizeLogicalMatmul(candidate, &notRecognized,
-                                           &notRecognizedClass, recognition);
-      if (failed(result))
-        continue;
-      if (llvm::any_of(matmuls, [&](const LogicalMatmul &m) {
-            return m.outputStore == result->outputStore;
-          }))
-        continue;
-      matmuls.push_back(*result);
-    }
-    // Stage 3: the outermost loops in which the recognizer found no GEMM, in program order,
-    // taken now, while every anchor is in place.
-    SmallVector<Operation *> drivenNests;
-    if (recordDriven)
-      module.walk([&](func::FuncOp function) {
-        for (Operation *loop : mlir::systolic::outermostLoops(function))
-          if (bound.find(loop) && llvm::none_of(matmuls, [&](const LogicalMatmul &m) {
-                return m.anchor == loop || loop->isAncestor(m.anchor);
-              }))
-            drivenNests.push_back(loop);
-      });
-    for (const LogicalMatmul &matmul : matmuls) {
-      mlir::systolic::NestRecordDecision decision =
-          mlir::systolic::checkNestRecord(*records, bound, matmul, indexWidth);
-      if (!decision.agrees) {
-        auto remark = matmul.anchor->emitRemark()
-                      << "affine GEMM not lowered to systolic.matmul_tile: nest record: "
-                      << decision.why;
-        if (classify)
-          remark << " [" << stringifyGemmMappingClass(GemmMappingClass::Unknown) << "]";
-        continue;
-      }
-      if (report)
-        matmul.anchor->emitRemark() << "nest record agrees: " << decision.summary;
-      std::string why;
-      GemmMappingClass mappingClass = GemmMappingClass::ProvenValid;
-      bool hardError = false;
-      if (succeeded(lowerOne(matmul, *fleet, why, mappingClass, hardError)))
-        continue;
-      if (hardError) {
-        signalPassFailure();
-        return;
-      }
-      auto remark = matmul.anchor->emitRemark()
-                    << "affine GEMM not lowered to systolic.matmul_tile: " << why;
-      if (classify)
-        remark << " [" << stringifyGemmMappingClass(mappingClass) << "]";
-    }
-    for (Operation *loop : drivenNests) {
-      std::string why;
-      FailureOr<mlir::systolic::RecordDrivenGemm> driven = mlir::systolic::analyzeRecordDrivenNest(
-          *records, bound, loop, indexWidth, recordTableBudget, why);
-      // A refusal is said where the research found a multiply-accumulate in the nest (its
-      // record has a GEMM), or always with report=true; other loops stay as they are, silently.
-      auto worthSaying = [&]() {
-        if (report)
-          return true;
-        const mlir::systolic::BoundNests::Nest *nest = bound.find(loop);
-        const llvm::json::Object *record =
-            nest ? records->nest(func::FuncOp(nest->function).getSymName(), nest->ordinal) : nullptr;
-        return record && record->getObject("gemm");
-      };
-      if (failed(driven)) {
-        if (worthSaying())
-          loop->emitRemark() << "GEMM not lowered from its record: " << why;
-        continue;
-      }
-      bool hardError = false;
-      if (succeeded(lowerRecordDriven(*driven, *fleet, why, hardError)))
-        continue;
-      if (hardError) {
-        signalPassFailure();
-        return;
-      }
-      loop->emitRemark() << "GEMM not lowered from its record: " << driven->where << ": " << why;
-    }
   }
 
   void runOnOperation() override {
