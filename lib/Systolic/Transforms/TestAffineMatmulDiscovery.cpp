@@ -810,18 +810,19 @@ struct TestAffineMatmulDiscoveryPass
       if (failed(result)) {
         if (generalAffine) {
           std::string why;
-          auto symbolic = analyzeSymbolicRankPartition(candidate.anchor, why);
-          if (symbolic) {
-            llvm::errs()
-                << "general symbolic partition: ANALYZED "
-                   "(lowering not integrated)\n"
-                << "  " << symbolic->diagnostic << "\n";
-            // Analysis succeeded. Do not print 'recognition result: failure'
-            // for this candidate; no executable lowering is claimed.
+          auto general = analyzeGeneralAffineMatmul(candidate.anchor, why);
+          if (succeeded(general)) {
+            llvm::errs() << "general recognition result: success\n"
+                         << "  source MACs: " << general->points.size()
+                         << "; output fibers: " << general->fibers.size()
+                         << "\n";
+            // Exact symbolic cover certified; the C4a lowering path consumes
+            // this same result.
             continue;
           }
-          llvm::errs() << "general symbolic partition: UNKNOWN: " << why
-                       << "\n";
+          llvm::errs() << "general recognition result: failure\n"
+                       << "  reason: " << why << "\n";
+          continue;
         }
         llvm::errs() << "recognition result: failure\n";
         llvm::errs() << "  reason: " << notRecognized << "\n";

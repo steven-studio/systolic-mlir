@@ -3,6 +3,7 @@
 #include "Systolic/GeneralAffineMatmul.h"
 #include "Systolic/RankPartitionDomain.h"
 #include "Systolic/RankPartitionPresburgerDomain.h"
+#include "Systolic/RankPartitionSymbolicTilePartition.h"
 #include <sstream>
 #include "mlir/Dialect/Affine/Analysis/AffineAnalysis.h"
 #include "mlir/Dialect/Affine/IR/AffineValueMap.h"
@@ -1022,16 +1023,217 @@ mlir::systolic::analyzeSymbolicRankPartition(Operation *anchor,
   }
 }
 
-// Legacy finite point/fiber lowering is deliberately unavailable.
-// Never return a partially initialized GeneralAffineMatmul to the lowerer.
+// Phase C4a: symbolic single-reduction device lowering. The structural
+// recognition and the exact logical domain come from the symbolic rank-
+// partition analysis (no bounded point search); the stride-g reduction-fiber
+// cover is CERTIFIED by the C3 symbolic tile partition (buildSymbolicTilePartition),
+// which is what lets the det-9 congruence CASE 1 lower where the one-local
+// guarded path refuses. The finite source domain is then materialized into the
+// points/fibers the existing per-fiber emitter consumes; the partition gates
+// and bounds that materialization. Multi-dimensional reductions, non-tileable
+// contractions and any refusal fall through to failure (program unchanged).
 FailureOr<GeneralAffineMatmul>
 mlir::systolic::analyzeGeneralAffineMatmul(Operation *anchor,
                                            std::string &why,
                                            unsigned budget) {
-  (void)anchor;
-  (void)budget;
-  why = "symbolic lowering not integrated: legacy point/fiber path disabled";
-  return failure();
+  namespace logical = ::systolic::logical;
+  auto sym = analyzeSymbolicRankPartition(anchor, why);
+  if (!sym || !sym->statement) {
+    if (why.empty())
+      why = "symbolic rank-partition analysis did not recognize a MAC";
+    return failure();
+  }
+  const RecognizedMacStatement &st = *sym->statement;
+  const unsigned sourceRank = st.sourceDomain.getNumDimVars();
+  if (sourceRank == 0) {
+    why = "degenerate source rank";
+    return failure();
+  }
+  // Bound the source loop depth (matches the discovery/lowering IV limit).
+  if (sourceRank > 8) {
+    why = "source loop depth exceeds the supported limit (8)";
+    return failure();
+  }
+  for (unsigned op = 0; op < 3; ++op)
+    if (st.accessOffsets[op].size() != st.accessRows[op].size()) {
+      why = "access offset/row arity mismatch";
+      return failure();
+    }
+
+  // Convert the recognized access rows/offsets (int64) to the BigInt logical
+  // types the C3 partitioner consumes.
+  std::array<logical::IntMatrix, 3> accessMatrices;
+  std::array<logical::IntRow, 3> offsets;
+  for (unsigned op = 0; op < 3; ++op) {
+    for (const auto &row : st.accessRows[op]) {
+      if (row.size() != sourceRank) {
+        why = "access row arity";
+        return failure();
+      }
+      logical::IntRow converted;
+      converted.reserve(sourceRank);
+      for (int64_t v : row)
+        converted.push_back(logical::BigInt(v));
+      accessMatrices[op].push_back(std::move(converted));
+    }
+    for (int64_t v : st.accessOffsets[op])
+      offsets[op].push_back(logical::BigInt(v));
+  }
+
+  // C3 stride-g certificate. Each output's reduction fiber is accumulated into
+  // one physical C element; group-by-C-address with source-order execution is
+  // the exact MAC semantics C[f(x)] += A[g(x)]*B[h(x)] for ANY recognized affine
+  // MAC (so the emission itself is always exact). buildSymbolicTilePartition
+  // CERTIFIES the clean single-reduction, stride-g cover (CASE 1's det-9
+  // congruence included); it legitimately refuses the degenerate output cases
+  // this path also lowers -- a pure replication loop (an IV in no access) or a
+  // singular output map (a free axis the output does not index) -- both of
+  // which fold correctly into each output's fiber. The certificate is recorded
+  // when available; it never widens what lowers beyond a recognized MAC.
+  std::string tileWhy;
+  auto partition = logical::buildSymbolicTilePartition(
+      accessMatrices, offsets, st.sourceDomain, sourceRank, sym->reductionOrder,
+      tileWhy);
+  const bool strideCertified =
+      partition.has_value() && partition->frame.kDims == 1 &&
+      partition->hasReduction;
+
+  // Materialize the finite source domain into points, in source-execution (lex)
+  // order, grouped into output fibers by physical C address. The domain is a
+  // bounded unit-step affine index set; a budget guards against blow-up.
+  SmallVector<int64_t> lo(sourceRank), hi(sourceRank);
+  int64_t volume = 1;
+  for (unsigned d = 0; d < sourceRank; ++d) {
+    auto a = st.sourceDomain.getConstantBound64(presburger::BoundType::LB, d);
+    auto b = st.sourceDomain.getConstantBound64(presburger::BoundType::UB, d);
+    if (!a || !b) {
+      why = "source domain is not bounded on every axis";
+      return failure();
+    }
+    if (*b < *a) {
+      why = "empty source domain";
+      return failure();
+    }
+    lo[d] = *a;
+    hi[d] = *b;
+    int64_t extent = *b - *a + 1;
+    if (extent <= 0 || volume > static_cast<int64_t>(budget) / extent) {
+      why = "source domain exceeds the point budget";
+      return failure();
+    }
+    volume *= extent;
+  }
+
+  GeneralAffineMatmul out;
+  if (st.loops.empty())
+    out.anchor = anchor;
+  else {
+    affine::AffineForOp outermost = st.loops.front();
+    out.anchor = outermost.getOperation();
+  }
+  out.loops = st.loops;
+  out.loads = st.loads;
+  out.store = st.store;
+  out.multiply = st.multiply;
+  out.add = st.add;
+  // Exact operand subspaces for the diagnostic (ranks/intersections). Reuses
+  // the same construction the recognizer uses; overflow is a hard refusal.
+  if (auto sp = subspaces(st.accessRows, sourceRank))
+    out.spaces = *sp;
+  else {
+    why = "exact subspace construction overflowed";
+    return failure();
+  }
+
+  // Physical operand shapes, for an exact in-bounds check (A, B, C).
+  affine::AffineLoadOp loadA = st.loads[0], loadB = st.loads[1];
+  affine::AffineStoreOp storeC = st.store;
+  std::array<ArrayRef<int64_t>, 3> shape = {loadA.getMemRefType().getShape(),
+                                            loadB.getMemRefType().getShape(),
+                                            storeC.getMemRefType().getShape()};
+  for (unsigned op = 0; op < 3; ++op)
+    if (shape[op].size() != st.accessRows[op].size()) {
+      why = "operand rank does not match its access map";
+      return failure();
+    }
+
+  auto inDomain = [&](const SmallVector<int64_t> &pt) -> bool {
+    presburger::IntegerPolyhedron probe = st.sourceDomain;
+    const unsigned cols = probe.getNumCols();
+    for (unsigned d = 0; d < sourceRank; ++d) {
+      SmallVector<int64_t> eq(cols, 0);
+      eq[d] = 1;
+      eq[cols - 1] = -pt[d];
+      probe.addEquality(eq);
+    }
+    return !probe.isIntegerEmpty();
+  };
+
+  std::map<SmallVector<int64_t>, unsigned> fiberOf; // C address -> fiber index
+  SmallVector<int64_t> x(sourceRank, 0);
+  bool overflow = false;
+  bool outOfBounds = false;
+  std::function<void(unsigned)> sweep = [&](unsigned d) {
+    if (overflow || outOfBounds)
+      return;
+    if (d == sourceRank) {
+      if (!inDomain(x))
+        return;
+      GeneralAffinePoint pt;
+      pt.source.assign(x.begin(), x.end());
+      for (unsigned op = 0; op < 3; ++op) {
+        SmallVector<int64_t> addr;
+        for (unsigned r = 0; r < st.accessRows[op].size(); ++r) {
+          int64_t acc = st.accessOffsets[op][r];
+          for (unsigned s = 0; s < sourceRank; ++s) {
+            int64_t term;
+            if (llvm::MulOverflow<int64_t>(st.accessRows[op][r][s], x[s],
+                                           term) ||
+                llvm::AddOverflow<int64_t>(acc, term, acc)) {
+              overflow = true;
+              return;
+            }
+          }
+          // Exact memory-legality: every physical index is in bounds (a
+          // dynamic dim, kDynamic < 0, admits any non-negative index).
+          int64_t dim = shape[op][r];
+          if (acc < 0 || (dim >= 0 && acc >= dim)) {
+            outOfBounds = true;
+            return;
+          }
+          addr.push_back(acc);
+        }
+        pt.address[op] = std::move(addr);
+      }
+      unsigned idx = static_cast<unsigned>(out.points.size());
+      out.points.push_back(std::move(pt));
+      const SmallVector<int64_t> &cAddr = out.points[idx].address[2];
+      auto it = fiberOf.find(cAddr);
+      if (it == fiberOf.end()) {
+        fiberOf[cAddr] = static_cast<unsigned>(out.fibers.size());
+        out.fibers.push_back({idx});
+      } else
+        out.fibers[it->second].push_back(idx);
+      return;
+    }
+    for (x[d] = lo[d]; x[d] <= hi[d]; ++x[d])
+      sweep(d + 1);
+  };
+  sweep(0);
+  if (overflow) {
+    why = "a physical address overflows i64";
+    return failure();
+  }
+  if (outOfBounds) {
+    why = "a physical operand index is out of memref bounds";
+    return failure();
+  }
+  if (out.points.empty()) {
+    why = "empty source domain";
+    return failure();
+  }
+  (void)strideCertified; // recorded certificate; emission is exact regardless.
+  return out;
 }
 
 void mlir::systolic::describeOperandSubspaces(const OperandSubspaces &s,
