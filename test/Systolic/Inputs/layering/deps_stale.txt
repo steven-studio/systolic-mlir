@@ -1,0 +1,12 @@
+lib/Systolic/Transforms/CMakeFiles/obj.MLIRSystolicTransforms.dir/GeneralizedMatmulToSystolic.cpp.o: #deps 7, deps mtime 1763500000000000000 (STALE)
+    /src/lib/Systolic/Transforms/GeneralizedMatmulToSystolic.cpp
+    /src/include/Systolic/GeneralizedMatmulToSystolic.h
+    /src/include/Systolic/AffineMatmulAnalysis.h
+    /opt/llvm/include/mlir/Dialect/Arith/IR/ArithAttributes.h
+    /opt/llvm/include/mlir/Dialect/Bufferization/IR/Bufferization.h
+    /opt/llvm/include/mlir/IR/SymbolTable.h
+    /opt/llvm/include/mlir/Dialect/Affine/IR/AffineOps.h
+
+lib/Systolic/Transforms/CMakeFiles/obj.MLIRSystolicTransforms.dir/MatmulTileLowering.cpp.o: #deps 2, deps mtime 1763500000000000000 (VALID)
+    /src/lib/Systolic/Transforms/MatmulTileLowering.cpp
+    /opt/llvm/include/mlir/Dialect/MemRef/IR/MemRef.h

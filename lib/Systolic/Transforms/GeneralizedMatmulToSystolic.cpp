@@ -5,10 +5,13 @@
 // left) and the lowering of a GEMM from its record: its gates, its plan, and what is emitted
 // in which order, by the record's formulas or by its tables. How each step is emitted is
 // MatmulTileLowering.cpp's: this file makes no operation of the affine, arith or memref
-// dialects and looks up no symbol. The record's own checks are NestRecordGate.cpp's, the
-// nest's own checks and the formulas and tables are NestRecordLowering.cpp's, and the dense
-// lowering of a GEMM the affine recognizer finds is the pass's (AffineMatmulToSystolic.cpp,
-// lowerOne), called through DenseMatmulLowering.
+// dialects and looks up no symbol. That boundary is a test:
+// test/Systolic/architecture_layering.mlir fails when the header of the memref or arith
+// operations, or of the partition into boxes, becomes a dependency of this file, through an
+// #include here or in a header included here. The record's own checks are
+// NestRecordGate.cpp's, the nest's own checks and the formulas and tables are
+// NestRecordLowering.cpp's, and the dense lowering of a GEMM the affine recognizer finds is
+// the pass's (AffineMatmulToSystolic.cpp, lowerOne), called through DenseMatmulLowering.
 //
 //===----------------------------------------------------------------------===//
 

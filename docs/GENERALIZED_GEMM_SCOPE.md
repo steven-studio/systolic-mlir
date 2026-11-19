@@ -1264,6 +1264,20 @@ file emits but through the interfaces its walk reads: `AffineMatmulAnalysis.h` (
 `LogicalMatmul` holds affine operations, and stage 2 is a gate on the GEMMs the affine
 recognizer finds) and `mlir/IR/BuiltinOps.h` (`ModuleOp`).
 
+**The boundary is a test.** `test/Systolic/architecture_layering.mlir`, run with the rest of
+the lit suite, fails when `GeneralizedMatmulToSystolic.cpp` comes to depend on
+`Systolic/AffineMatmulPartitioning.h`, `mlir/Dialect/MemRef/IR/MemRef.h` or
+`mlir/Dialect/Arith/IR/Arith.h`. `test/Systolic/Inputs/check_layering.py` holds the rule and
+looks two ways: at the file's `#include` lines followed through every header of the project it
+includes (it says through which line of which file the header comes), and at the dependency
+list the build recorded for the file's object (`ninja -t deps`), which also has what comes
+through MLIR's own headers. A build whose list cannot be read, or is older than the sources,
+is not passed. `mlir/Dialect/Affine/IR/AffineOps.h` is listed as planned: it is said and not
+refused, and on the day it no longer reaches the file the test fails once, to have it moved
+to the forbidden list. The test's other commands run the checker on small trees
+(`Inputs/layering`) that each break the rule one way. To forbid something else, or to guard
+another file, add to `RULES` in the script.
+
 ## The thesis
 
 The thesis text of 2026-11-06 (465 pages) makes no claim about merging loops: Definition 4.5
