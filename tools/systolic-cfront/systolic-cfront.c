@@ -125,6 +125,102 @@
 
 /* ---------------------------------------------------------------- helpers */
 
+/* This program translates one file and ends, and most of what it allocates
+   (the text of the output, names, forms, the captured output of clang) lives
+   until then. Nothing released it: main returned, or an error path called
+   exit, with all of it allocated. Every block this file allocates is recorded
+   here, taken off the record when it is freed or reallocated, and what is
+   left is freed when the process ends, whichever way it ends. A pointer that
+   was allocated elsewhere (open_memstream's buffer, the JSON reader's) is not
+   on the record and is freed as it always was. */
+static void **live_blocks;      /* open addressing; NULL empty, LIVE_GONE a hole */
+static size_t live_cap, live_used, live_filled;
+#define LIVE_GONE ((void *)1)
+
+static size_t live_slot(void *p, size_t cap) {
+  return (size_t)(((uintptr_t)p >> 4) * 0x9E3779B97F4A7C15ull) & (cap - 1);
+}
+
+static void live_release_all(void) {
+  for (size_t i = 0; i < live_cap; ++i)
+    if (live_blocks[i] && live_blocks[i] != LIVE_GONE)
+      free(live_blocks[i]);
+  free(live_blocks);
+  live_blocks = NULL;
+  live_cap = live_used = live_filled = 0;
+}
+
+static void live_add(void *p) {
+  if (!p)
+    return;
+  if (2 * (live_filled + 1) > live_cap) {
+    size_t cap = live_cap ? live_cap : 1024;
+    while (2 * (live_used + 1) > cap)
+      cap *= 2;
+    if (4 * (live_used + 1) > cap)
+      cap *= 2;
+    void **blocks = calloc(cap, sizeof *blocks);
+    if (!blocks) {
+      fprintf(stderr, "systolic-cfront: out of memory\n");
+      exit(2);
+    }
+    for (size_t i = 0; i < live_cap; ++i)
+      if (live_blocks[i] && live_blocks[i] != LIVE_GONE) {
+        size_t s = live_slot(live_blocks[i], cap);
+        while (blocks[s])
+          s = (s + 1) & (cap - 1);
+        blocks[s] = live_blocks[i];
+      }
+    if (!live_blocks)
+      atexit(live_release_all);
+    free(live_blocks);
+    live_blocks = blocks;
+    live_cap = cap;
+    live_filled = live_used;
+  }
+  size_t s = live_slot(p, live_cap);
+  while (live_blocks[s] && live_blocks[s] != LIVE_GONE)
+    s = (s + 1) & (live_cap - 1);
+  if (!live_blocks[s])
+    ++live_filled;
+  live_blocks[s] = p;
+  ++live_used;
+}
+
+static void live_remove(void *p) {
+  if (!p || !live_cap)
+    return;
+  for (size_t s = live_slot(p, live_cap); live_blocks[s]; s = (s + 1) & (live_cap - 1))
+    if (live_blocks[s] == p) {
+      live_blocks[s] = LIVE_GONE;
+      --live_used;
+      return;
+    }
+}
+
+static void *live_malloc(size_t n) {
+  void *p = malloc(n);
+  live_add(p);
+  return p;
+}
+
+static void *live_realloc(void *old, size_t n) {
+  live_remove(old);
+  void *p = realloc(old, n);
+  live_add(p ? p : old);   /* realloc that fails leaves the old block as it is */
+  return p;
+}
+
+static void live_free(void *p) {
+  live_remove(p);
+  free(p);
+}
+
+/* From here on this file's malloc, realloc and free are the recorded ones. */
+#define malloc(n) live_malloc(n)
+#define realloc(p, n) live_realloc(p, n)
+#define free(p) live_free(p)
+
 static void *xmalloc(size_t n) {
   void *p = malloc(n ? n : 1);
   if (!p) {
