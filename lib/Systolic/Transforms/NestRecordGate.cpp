@@ -191,6 +191,31 @@ BoundNests::BoundNests(ModuleOp module) {
   });
 }
 
+BoundNests::BoundNests(ModuleOp module, const BoundNests &atInput) {
+  module.walk([&](func::FuncOp function) {
+    if (function.isExternal())
+      return;
+    FunctionRoots roots = numberFunctionRoots(function);
+    for (Operation *loop : outermostLoops(function)) {
+      // A loop at the address of a nest of atInput is that nest only if its binding says so:
+      // an operation made after one was erased may reuse its address.
+      const Nest *before = atInput.find(loop);
+      if (!before || before->function != function || !before->binding)
+        continue;
+      std::string why;
+      FailureOr<NestBinding> now = computeNestBinding(function, loop, before->ordinal, roots, why);
+      if (failed(now) || now->sha256 != before->binding->sha256 || now->text != before->binding->text)
+        continue;
+      Nest nest;
+      nest.function = function;
+      nest.ordinal = before->ordinal;
+      nest.binding = std::move(*now);
+      nestOf[loop] = std::move(nest);
+    }
+    rootsOf[function.getOperation()] = std::move(roots);
+  });
+}
+
 const BoundNests::Nest *BoundNests::find(Operation *loop) const {
   auto found = nestOf.find(loop);
   return found == nestOf.end() ? nullptr : &found->second;

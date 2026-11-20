@@ -47,6 +47,26 @@
  *     wait per GEMM (--submission auto, the default; sync keeps one
  *     synchronous call per tile, async insists and is refused elsewhere).
  *
+ * The Generalized GEMM fallback (docs/GENERALIZED_GEMM_SCOPE.md, "The
+ * fallback in systolic-cc"), on by default: the front end gives array
+ * parameters written with a leading bound their static extent and takes
+ * subscripts E % C (systolic-cfront --static-extents --modulo-subscripts);
+ * after the first GEMM lowering, the research tool
+ * generalized-gemm-nest-report, when it is found, writes the records of the
+ * functions with a GEMM site that lowering left (10-nest-records.json; not
+ * run without --fp-reassociation, since nothing it verifies could then be
+ * lowered); and --affine-matmul-to-systolic runs again with
+ * generalized-fallback: every path of the pass first, then each nest left as
+ * it was, in which the recognizer finds no GEMM, lowered from its record. A
+ * nest neither takes stays on the host. The tool is a separate executable, never linked: --nest-report PATH,
+ * else SYSTOLIC_NEST_REPORT, else the one the build was configured with
+ * (-DSYSTOLIC_NEST_REPORT), else generalized-gemm-nest-report next to this
+ * program, in the build's bin/, or on PATH; when none is found, or it fails,
+ * the fallback is skipped (a note with --explain) and the compile goes on as
+ * without it. --nest-records FILE reads records made beforehand instead of
+ * running the tool. --no-generalized-gemm compiles as before the fallback
+ * existed: no front-end option, no records, the pass without them.
+ *
  * The compiler prints only errors, unless --explain (what it offloads and
  * why not).
  *
@@ -232,6 +252,9 @@ typedef struct {
   int fp_reassociation;         /* --fp-reassociation */
   int no_reduction_batches;     /* --no-reduction-batches */
   int fp_distribute;            /* --fp-distribute */
+  int no_generalized;           /* --no-generalized-gemm */
+  const char *nest_records;     /* --nest-records FILE */
+  const char *nest_report;      /* --nest-report PATH */
   double verify_rtol;
   strvec defines, includes;
   const char *self_dir;        /* where this executable is: systolic-cfront */
@@ -1081,6 +1104,132 @@ static void add_frontend_flags(strvec *v, const options *a) {
   add_flags(v, a);
   if (a->fp_reassociation)
     push(v, "--fp-reassociation");
+  /* The Generalized GEMM fallback reads records only of static extents, and
+     its tables lower subscripts the affine recognizer has no view of. */
+  if (!a->no_generalized) {
+    push(v, "--static-extents");
+    push(v, "--modulo-subscripts");
+  }
+}
+
+/* The research tool that writes the records of loop nests: a separate
+   executable (never linked into this build). NULL when none is found. */
+static const char *find_nest_report(const options *a) {
+  if (a->nest_report)
+    return access(a->nest_report, X_OK) == 0 ? a->nest_report : NULL;
+  const char *env = getenv("SYSTOLIC_NEST_REPORT");
+  if (env && *env)
+    return access(env, X_OK) == 0 ? env : NULL;
+#ifdef SYSTOLIC_DEFAULT_NEST_REPORT
+  /* the one this build was configured with (-DSYSTOLIC_NEST_REPORT) */
+  if (SYSTOLIC_DEFAULT_NEST_REPORT[0] &&
+      access(SYSTOLIC_DEFAULT_NEST_REPORT, X_OK) == 0)
+    return SYSTOLIC_DEFAULT_NEST_REPORT;
+#endif
+  const char *places[] = {format("%s/generalized-gemm-nest-report", a->self_dir),
+                          format("%s/bin/generalized-gemm-nest-report", a->build_dir)};
+  for (size_t i = 0; i < sizeof places / sizeof *places; ++i)
+    if (access(places[i], X_OK) == 0)
+      return places[i];
+  const char *path = getenv("PATH");
+  if (!path)
+    return NULL;
+  char *copy = format("%s", path);
+  for (char *dir = strtok(copy, ":"); dir; dir = strtok(NULL, ":")) {
+    char *candidate = format("%s/generalized-gemm-nest-report", dir);
+    if (*dir && access(candidate, X_OK) == 0)
+      return candidate;
+  }
+  return NULL;
+}
+
+/* The records of the loop nests of `functions` in `input` for the Generalized
+   GEMM fallback, written to 10-nest-records.json, or NULL when there are none:
+   no tool, or it fails or runs out of time on every function (each failure a
+   note with --explain). The tool runs once per function (--function), each
+   run within SYSTOLIC_CC_NEST_REPORT_TIMEOUT seconds (default 300) and each of
+   its solver queries within 30 s; a claim it cannot make is refused by the
+   pass, never assumed. `roots` is the most memory roots a function has (its
+   array parameters): every pair of them is named separate for the research
+   analysis, which records what each claim rests on. The pass refuses a record
+   that rests on a name other than (A, C) or (B, C), and its own alias check
+   proves those two (llvm.noalias, i.e. restrict) before any lowering, so no
+   name is assumed unchecked. */
+static const char *nest_records(driver *d, const char *input, size_t roots,
+                                const strvec *functions) {
+  const options *a = d->a;
+  const char *tool = find_nest_report(a);
+  if (!tool) {
+    log_note("note: the Generalized GEMM fallback is skipped: "
+             "generalized-gemm-nest-report was not found (--nest-report, "
+             "SYSTOLIC_NEST_REPORT, -DSYSTOLIC_NEST_REPORT, %s, %s/bin or PATH)",
+             a->self_dir, a->build_dir);
+    return NULL;
+  }
+  buffer names = {0};
+  bprintf(&names, "--authorize=");
+  for (size_t x = 0; x < roots; ++x)
+    for (size_t y = x + 1; y < roots; ++y)
+      bprintf(&names, "%sroots %zu and %zu are separate",
+              x == 0 && y == 1 ? "" : ",", x, y);
+  const char *limit = getenv("SYSTOLIC_CC_NEST_REPORT_TIMEOUT");
+  buffer merged = {0};
+  size_t made = 0;
+  bprintf(&merged, "[\n");
+  for (size_t f = 0; f < functions->n; ++f) {
+    strvec cmd = {0};
+    if (access("/usr/bin/timeout", X_OK) == 0) {
+      push(&cmd, "/usr/bin/timeout");
+      push(&cmd, limit && *limit ? limit : "300");
+    }
+    push(&cmd, tool);
+    push(&cmd, input);
+    push(&cmd, format("--function=%s", functions->items[f]));
+    push(&cmd, "--index-bit-width=64");
+    if (roots >= 2)
+      push(&cmd, names.text);
+    push(&cmd, "--max-level=1");
+    push(&cmd, "--candidates-per-group=1");
+    push(&cmd, "--timeout-ms=30000");
+    result r;
+    if (run(d, &cmd, "generalized-gemm-nest-report", NULL, NULL, &r) != 0) {
+      log_note("note: no Generalized GEMM records of '%s': %s",
+               functions->items[f], d->error);
+      d->error[0] = 0;
+      continue;
+    }
+    /* one JSON array per run, of the one function: its element(s) */
+    const char *open = r.out ? strchr(r.out, '[') : NULL;
+    const char *close = r.out ? strrchr(r.out, ']') : NULL;
+    if (!open || !close || close < open) {
+      log_note("note: no Generalized GEMM records of '%s': the tool wrote no "
+               "JSON array", functions->items[f]);
+      continue;
+    }
+    ++open;
+    while (open < close && isspace((unsigned char)*open))
+      ++open;
+    const char *end = close;
+    while (end > open && isspace((unsigned char)end[-1]))
+      --end;
+    if (end == open)
+      continue;
+    bprintf(&merged, "%s%.*s", made ? ",\n" : "", (int)(end - open), open);
+    ++made;
+  }
+  bprintf(&merged, "\n]\n");
+  if (!made) {
+    log_note("note: the Generalized GEMM fallback is skipped: no records were "
+             "made");
+    return NULL;
+  }
+  const char *out = kpath(d, "10-nest-records.json");
+  if (!write_file(out, merged.text, merged.n)) {
+    log_note("note: the Generalized GEMM fallback is skipped: cannot write %s",
+             out);
+    return NULL;
+  }
+  return out;
 }
 
 static int compile(driver *d) {
@@ -1186,36 +1335,71 @@ static int compile(driver *d) {
   const json_value *fns = json_get(interface, "functions");
   size_t nfns = json_size(fns);
 
+  /* The records of the program's loop nests, for the Generalized GEMM
+     fallback (NULL: skipped). */
+  size_t roots = 0;
+  for (size_t f = 0; f < nfns; ++f) {
+    const json_value *params = json_get(json_at(fns, f), "params");
+    size_t memrefs = 0;
+    for (size_t p = 0; p < json_size(params); ++p)
+      memrefs += strcmp(json_string(json_get(json_at(params, p), "kind"), ""),
+                        "memref") == 0;
+    if (memrefs > roots)
+      roots = memrefs;
+  }
+  /* Records made beforehand (--nest-records) are read from the first
+     lowering on; else the tool runs after it, on the functions with a GEMM
+     site the lowering left, and the lowering runs a second time with them. */
+  const char *records = a->no_generalized ? NULL : a->nest_records;
+  char *fallback_opts = records ? format(" nest-records=%s generalized-fallback=true",
+                                         records)
+                                : format("%s", "");
+
   /* 2. Which of them hold a GEMM the existing pass lowers. */
   function_info *offload = xmalloc((nfns ? nfns : 1) * sizeof *offload);
   size_t noffload = 0;
   strvec not_offloaded = {0};
   if (nfns) {
+   const char *remarks = NULL;
+   for (int round = 0;; ++round) {
+    /* Each round reads the sites afresh. */
+    free(lowered);
+    lowered = NULL;
+    nlowered = 0;
+    for (size_t i = 0; i < nsites; ++i)
+      sites[i].lowered = 0, sites[i].report =
+          json_bool(json_get(json_at(sitelist, i), "report"), 1);
     strvec c2 = argv_of(opt, fleet,
                         format("--affine-matmul-to-systolic=report=true "
-                               "cost-model=%s%s%s general-affine=%s%s",
+                               "cost-model=%s%s%s general-affine=%s%s%s",
                                a->cost_model,
                                a->no_reduction_batches
                                    ? " reduction-batches=false"
                                    : "",
-                               a->fp_distribute ? " fp-distribute=true" : "", general_affine, test_opts),
+                               a->fp_distribute ? " fp-distribute=true" : "", general_affine, test_opts,
+                               fallback_opts),
                         kpath(d, "10-frontend.mlir"), "-o",
                         kpath(d, "20-systolic.mlir"), NULL);
     if (run(d, &c2, "GEMM recognition / Affine Partitioning", NULL, NULL,
             &r) != 0)
       return -1;
-    const char *remarks = r.err;
+    remarks = r.err;
     write_file(kpath(d, "20-remarks.txt"), remarks, strlen(remarks));
     /* "FILE:L:C: remark: affine GEMM MxNxK lowered as R exact region(s)":
        the nest at L:C runs as R systolic.matmul_tile invocations. */
-    static const char lowered_mark[] = ": remark: affine GEMM ";
-    for (const char *m = strstr(remarks, lowered_mark); m;
-         m = strstr(m + 1, lowered_mark)) {
+    /* The Generalized GEMM fallback says "FILE:L:C: remark: GEMM MxNxK of
+       nest N of F lowered from its record as R exact region(s) (...)". */
+    static const char *const lowered_marks[2][2] = {
+        {": remark: affine GEMM ", " lowered as "},
+        {": remark: GEMM ", " lowered from its record as "}};
+    for (int which = 0; which < 2; ++which)
+    for (const char *m = strstr(remarks, lowered_marks[which][0]); m;
+         m = strstr(m + 1, lowered_marks[which][0])) {
       const char *eol = strchr(m, '\n');
-      const char *as = strstr(m, " lowered as ");
+      const char *as = strstr(m, lowered_marks[which][1]);
       if (!as || (eol && as > eol))
         continue;
-      long regions = strtol(as + 12, NULL, 10);
+      long regions = strtol(as + strlen(lowered_marks[which][1]), NULL, 10);
       long long repeat = 1;
       const char *runs = strstr(as, "; the enclosing loops run it ");
       if (runs && (!eol || runs < eol)) {
@@ -1297,6 +1481,47 @@ static int compile(driver *d) {
       sites[match].lowered = 1;
       sites[match].report = 1;
     }
+    /* After the first lowering: the Generalized GEMM fallback for the
+       translated functions with a GEMM site it left. */
+    if (round > 0 || records || a->no_generalized)
+      break;
+    strvec left = {0};
+    for (size_t i = 0; i < nsites; ++i) {
+      if (sites[i].lowered)
+        continue;
+      /* the function's symbol in the MLIR (the front end's suffix) */
+      const char *symbol = NULL;
+      int listed = 0;
+      for (size_t f = 0; f < nfns; ++f)
+        if (strcmp(sites[i].function,
+                   json_string(json_get(json_at(fns, f), "name"), "")) == 0)
+          symbol = json_string(json_get(json_at(fns, f), "symbol"), NULL);
+      for (size_t l = 0; symbol && l < left.n; ++l)
+        listed |= strcmp(left.items[l], symbol) == 0;
+      if (symbol && !listed)
+        push(&left, symbol);
+    }
+    if (!left.n)
+      break;
+    /* The fallback lowers a floating-point GEMM only where the program
+       permits reassociating its sums (fastmath<reassoc>), and the front end
+       marks nothing without --fp-reassociation: no record could help. */
+    if (!a->fp_reassociation) {
+      log_note("note: the Generalized GEMM fallback is skipped: without "
+               "--fp-reassociation it can lower no GEMM");
+      break;
+    }
+    records = nest_records(d, kpath(d, "10-frontend.mlir"), roots, &left);
+    if (records && strpbrk(records, " \t{}\"'")) {
+      log_note("note: the Generalized GEMM fallback is skipped: the path %s "
+               "cannot be given as a pass option", records);
+      records = NULL;
+    }
+    if (!records)
+      break;
+    write_file(kpath(d, "20-remarks-standard.txt"), remarks, strlen(remarks));
+    fallback_opts = format(" nest-records=%s generalized-fallback=true", records);
+   }
     char *systolic = read_file(kpath(d, "20-systolic.mlir"), NULL);
     for (size_t i = 0; i < nfns; ++i) {
       const json_value *fn = json_at(fns, i);
@@ -1412,13 +1637,32 @@ static int compile(driver *d) {
       return -1;
     strvec c4 = argv_of(
         opt, fleet,
-        format("--affine-matmul-to-systolic=cost-model=%s%s%s general-affine=%s%s", a->cost_model,
+        format("--affine-matmul-to-systolic=cost-model=%s%s%s general-affine=%s%s%s", a->cost_model,
                a->no_reduction_batches ? " reduction-batches=false" : "",
-               a->fp_distribute ? " fp-distribute=true" : "", general_affine, test_opts),
+               a->fp_distribute ? " fp-distribute=true" : "", general_affine, test_opts,
+               fallback_opts),
                         kpath(d, "30-kernels.mlir"), "-o",
                         kpath(d, "40-systolic.mlir"), NULL);
     if (run(d, &c4, "Affine -> Systolic", NULL, NULL, &r))
       return -1;
+    /* The records were made of the whole program (10-frontend.mlir) and are
+       read here on the offloaded functions alone: a nest's record binds to
+       its function's text, which is the same in both. Should a function
+       still come out differently, its shim would call a kernel that does
+       not run what the plan says: refused. */
+    if (records) {
+      char *first = read_file(kpath(d, "20-systolic.mlir"), NULL);
+      char *second = read_file(kpath(d, "40-systolic.mlir"), NULL);
+      for (size_t i = 0; i < noffload; ++i)
+        if (tiles_of(first, offload[i].symbol) != tiles_of(second, offload[i].symbol)) {
+          snprintf(d->error, sizeof d->error,
+                   "'%s' is lowered to %ld tile(s) on the whole program and to %ld "
+                   "on the offloaded functions; compile with --no-generalized-gemm",
+                   offload[i].name, tiles_of(first, offload[i].symbol),
+                   tiles_of(second, offload[i].symbol));
+          return -1;
+        }
+    }
     strvec c5 = argv_of(opt, phys, kpath(d, "40-systolic.mlir"), "-o",
                         kpath(d, "50-fpga.mlir"), NULL);
     if (run(d, &c5, "FPGA lowering", NULL, NULL, &r))
@@ -1524,7 +1768,9 @@ static void usage(void) {
           "[--submission auto|sync|async] [--cost-model v1|v2] "
           "[--k-max-8x8 N] [--k-max-4x4 N] [--verify] [--verify-rtol R] "
           "[--keep-dir DIR] [--explain] [--fp-reassociation] "
-          "[--no-reduction-batches] [--fp-distribute] [-DNAME[=VAL]] "
+          "[--no-reduction-batches] [--fp-distribute] "
+          "[--no-generalized-gemm] [--nest-records FILE] [--nest-report PATH] "
+          "[-DNAME[=VAL]] "
           "[-IDIR] [-std=STD] "
           "[-ON] FILE.c "
           "-o PROGRAM\n");
@@ -1617,6 +1863,14 @@ int main(int argc, char **argv) {
       a.no_reduction_batches = 1;
     } else if (strcmp(s, "--fp-distribute") == 0) {
       a.fp_distribute = 1;
+    } else if (strcmp(s, "--generalized-gemm") == 0) {
+      a.no_generalized = 0;   /* the default */
+    } else if (strcmp(s, "--no-generalized-gemm") == 0) {
+      a.no_generalized = 1;
+    } else if ((v = option_value(s, "--nest-records", &i, argc, argv))) {
+      a.nest_records = v;
+    } else if ((v = option_value(s, "--nest-report", &i, argc, argv))) {
+      a.nest_report = v;
     } else if ((v = option_value(s, "--keep-dir", &i, argc, argv))) {
       a.keep_dir = v;
     } else if (strcmp(s, "-o") == 0) {
@@ -1665,6 +1919,20 @@ int main(int argc, char **argv) {
   }
   if (!a.keep_dir)
     a.keep_dir = format("%s.systolic", a.output);
+  if (a.nest_records && a.no_generalized) {
+    log_error("--nest-records is read by the Generalized GEMM fallback, which "
+              "--no-generalized-gemm turns off");
+    return 2;
+  }
+  if (a.nest_records) {
+    /* the pass runs in this directory too, but name the file absolutely */
+    char real[PATH_MAX];
+    if (!realpath(a.nest_records, real)) {
+      log_error("cannot read %s: %s", a.nest_records, strerror(errno));
+      return 2;
+    }
+    a.nest_records = format("%s", real);
+  }
 
   /* systolic-cfront is installed next to this program. */
   char self[PATH_MAX];

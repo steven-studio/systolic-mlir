@@ -264,14 +264,24 @@ struct RecordsMode : GeneralizedMatmulOptions {
       if (classify)
         remark << " [" << stringifyGemmMappingClass(mappingClass) << "]";
     }
+    return lowerDrivenNests(*records, bound, drivenNests, *fleet, indexWidth, /*sayAll=*/report);
+  }
+
+  /// Stage 3 for each of `drivenNests`, in order: each lowered from its record, or a remark.
+  LogicalResult lowerDrivenNests(const mlir::systolic::NestRecordFile &file,
+                                 const mlir::systolic::BoundNests &bound,
+                                 ArrayRef<Operation *> drivenNests, const SystolicFleet &fleet,
+                                 unsigned indexWidth, bool sayAll) {
+    const mlir::systolic::NestRecordFile *records = &file;
     for (Operation *loop : drivenNests) {
       std::string why;
       FailureOr<mlir::systolic::RecordDrivenGemm> driven = mlir::systolic::analyzeRecordDrivenNest(
           *records, bound, loop, indexWidth, recordTableBudget, why);
       // A refusal is said where the research found a multiply-accumulate in the nest (its
-      // record has a GEMM), or always with report=true; other loops stay as they are, silently.
+      // record has a GEMM), or always with sayAll (report=true in the records mode); other
+      // loops stay as they are, silently.
       auto worthSaying = [&]() {
-        if (report)
+        if (sayAll)
           return true;
         const mlir::systolic::BoundNests::Nest *nest = bound.find(loop);
         const llvm::json::Object *record =
@@ -284,7 +294,7 @@ struct RecordsMode : GeneralizedMatmulOptions {
         continue;
       }
       bool hardError = false;
-      if (succeeded(lowerRecordDriven(*driven, *fleet, why, hardError)))
+      if (succeeded(lowerRecordDriven(*driven, fleet, why, hardError)))
         continue;
       if (hardError) {
         return failure();
@@ -292,6 +302,52 @@ struct RecordsMode : GeneralizedMatmulOptions {
       loop->emitRemark() << "GEMM not lowered from its record: " << driven->where << ": " << why;
     }
     return success();
+  }
+
+  /// generalized-fallback: after the pass's own paths have run on the module. The nests left
+  /// that are still as they were at the pass's input (`atInput`) and in which the dense
+  /// recognizer finds no GEMM are lowered from their records (stage 3), each where it stands.
+  /// A nest the recognizer finds a GEMM in stays as the pass's paths left it: they refused it
+  /// for a reason of their own, and a record never overrules a refusal.
+  LogicalResult runFallback(const mlir::systolic::BoundNests &atInput) {
+    ModuleOp module = getOperation();
+    FailureOr<SystolicFleet> fleet = collectSystolicFleet(module);
+    if (failed(fleet))
+      return failure();
+    std::string error;
+    FailureOr<mlir::systolic::NestRecordFile> records =
+        mlir::systolic::NestRecordFile::load(nestRecords, error);
+    if (failed(records)) {
+      module.emitError() << "affine-matmul-to-systolic: nest-records: " << error;
+      return failure();
+    }
+    const unsigned indexWidth =
+        DataLayout(module).getTypeSizeInBits(IndexType::get(module.getContext())).getFixedValue();
+    const mlir::systolic::BoundNests bound(module, atInput);
+    nextGemmIndex = nextSystolicGemmIndex(module);
+
+    SmallVector<AffineMatmulCandidate> candidates;
+    collectAffineMatmulCandidates(module.getOperation(), candidates);
+    SmallVector<Operation *> recognized;
+    for (AffineMatmulCandidate candidate : candidates) {
+      AffineMatmulRecognitionOptions recognition;
+      recognition.countersAsWritten = true;
+      recognition.reductionBatches = reductionBatches;
+      std::string notRecognized;
+      GemmMappingClass notRecognizedClass = GemmMappingClass::ProvenInvalid;
+      auto result = recognizeLogicalMatmul(candidate, &notRecognized, &notRecognizedClass, recognition);
+      if (succeeded(result))
+        recognized.push_back(result->anchor);
+    }
+    SmallVector<Operation *> drivenNests;
+    module.walk([&](func::FuncOp function) {
+      for (Operation *loop : mlir::systolic::outermostLoops(function))
+        if (bound.find(loop) && llvm::none_of(recognized, [&](Operation *anchor) {
+              return anchor == loop || loop->isAncestor(anchor);
+            }))
+          drivenNests.push_back(loop);
+    });
+    return lowerDrivenNests(*records, bound, drivenNests, *fleet, indexWidth, /*sayAll=*/false);
   }
 };
 
@@ -301,4 +357,16 @@ LogicalResult mlir::systolic::runGeneralizedMatmulToSystolic(
     ModuleOp module, const GeneralizedMatmulOptions &options,
     int64_t &nextGemmIndex, DenseMatmulLowering lowerOne) {
   return RecordsMode(module, options, nextGemmIndex, lowerOne).run();
+}
+
+LogicalResult mlir::systolic::runGeneralizedMatmulFallback(ModuleOp module,
+                                                           const GeneralizedMatmulOptions &options,
+                                                           int64_t &nextGemmIndex,
+                                                           const BoundNests &atInput) {
+  auto noDenseLowering = [](const LogicalMatmul &, const SystolicFleet &, std::string &why,
+                            GemmMappingClass &, bool &) -> LogicalResult {
+    why = "the fallback lowers no GEMM of the dense recognizer";
+    return failure();
+  };
+  return RecordsMode(module, options, nextGemmIndex, noDenseLowering).runFallback(atInput);
 }

@@ -65,6 +65,7 @@
 #include "Systolic/GeneralizedMatmulToSystolic.h"
 #include "Systolic/KernelCosetLowering.h"
 #include "Systolic/MatmulTileLowering.h"
+#include "Systolic/NestRecordGate.h"
 #include "Systolic/NestRecordLowering.h"
 #include "Systolic/RankPartitionDeviceJobLowering.h"
 #include "Systolic/RankPartitionRecognizedMacAdapter.h"
@@ -2342,6 +2343,18 @@ struct AffineMatmulToSystolicPass
                      "tables of its addresses to be built at compile time"),
       llvm::cl::init(mlir::systolic::kDefaultRecordTableBudget)};
 
+  // The fallback of systolic-cc (docs/GENERALIZED_GEMM_SCOPE.md, "The fallback in
+  // systolic-cc"). Off by default; with it, nest-records names the file it reads.
+  Option<bool> generalizedFallback{
+      *this, "generalized-fallback",
+      llvm::cl::desc("With nest-records: the pass first runs as it does without records (every "
+                     "path and every option as given); then each loop nest left that is still "
+                     "as it was at the pass's input and in which this pass's recognizer finds "
+                     "no GEMM is lowered from its record, as record-driven lowers it, where it "
+                     "stands. A nest the pass's paths changed, lowered or refused for a GEMM "
+                     "they recognized is never touched by the fallback"),
+      llvm::cl::init(false)};
+
   void getDependentDialects(DialectRegistry &registry) const override {
     // Phase 5.4.3d-3b-5: the guarded MAC replacement creates scf.if and
     // arith operations in a module that may contain none.
@@ -2765,7 +2778,7 @@ struct AffineMatmulToSystolicPass
   /// numbering of the GEMMs and its dense lowering (lowerOne, for a GEMM this pass's
   /// recognizer finds and the records admit), and fails when the mode does. Nothing of the
   /// mode is decided here.
-  void runWithNestRecords() {
+  GeneralizedMatmulOptions generalizedOptions() {
     GeneralizedMatmulOptions options;
     options.nestRecords = nestRecords.getValue();
     options.recordDriven = recordDriven;
@@ -2783,6 +2796,11 @@ struct AffineMatmulToSystolicPass
     options.certifiedOffloadFirst = certifiedOffloadFirst;
     options.commonFiberOffload = commonFiberOffload;
     options.fpDistribute = fpDistribute;
+    return options;
+  }
+
+  void runWithNestRecords() {
+    GeneralizedMatmulOptions options = generalizedOptions();
     auto dense = [&](const LogicalMatmul &matmul, const SystolicFleet &fleet,
                      std::string &why, GemmMappingClass &mappingClass,
                      bool &hardError) {
@@ -2800,15 +2818,45 @@ struct AffineMatmulToSystolicPass
       signalPassFailure();
       return;
     }
+    if (generalizedFallback) {
+      if (nestRecords.empty()) {
+        getOperation().emitError() << "affine-matmul-to-systolic: generalized-fallback reads the "
+                                      "records of nest-records, and none is given";
+        signalPassFailure();
+        return;
+      }
+      // The nests as the pass receives them, before anything rewrites or lowers one.
+      const mlir::systolic::BoundNests atInput(getOperation());
+      runWithoutRecords();
+      if (standardFailed)
+        return;
+      GeneralizedMatmulOptions options = generalizedOptions();
+      options.recordDriven = true;
+      if (failed(runGeneralizedMatmulFallback(getOperation(), options, nextGemmIndex, atInput)))
+        signalPassFailure();
+      return;
+    }
     if (!nestRecords.empty()) {
       runWithNestRecords();
       return;
     }
+    runWithoutRecords();
+  }
+
+  /// Set by runWithoutRecords when it fails.
+  bool standardFailed = false;
+  void failStandard() {
+    standardFailed = true;
+    signalPassFailure();
+  }
+
+  /// The pass without records: every path it has, as the options say.
+  void runWithoutRecords() {
     ModuleOp module = getOperation();
 
     FailureOr<SystolicFleet> fleet = collectSystolicFleet(module);
     if (failed(fleet)) {
-      signalPassFailure();
+      failStandard();
       return;
     }
 
@@ -3108,7 +3156,7 @@ struct AffineMatmulToSystolicPass
         auto replaced =
             attemptDeviceJobs(builder, guarded.anchor, outcome, why, hardError);
         if (hardError) {
-          signalPassFailure();
+          failStandard();
           return;
         }
         certifiedTried[i] = true;
@@ -3155,7 +3203,7 @@ struct AffineMatmulToSystolicPass
         continue;
       }
       if (hardError) {
-        signalPassFailure();
+        failStandard();
         return;
       }
       auto remark = matmul.anchor->emitRemark()
@@ -3202,7 +3250,7 @@ struct AffineMatmulToSystolicPass
         auto offloaded = attemptDeviceJobs(builder, guarded.anchor,
                                            deviceOutcome, deviceWhy, hardError);
         if (hardError) {
-          signalPassFailure();
+          failStandard();
           return;
         }
         if (offloaded) {

@@ -426,8 +426,8 @@ cell keeps its bits; with data in [−1, 1) cells differ, and every difference i
 leading extent (`memref<?xKxf32>`). The research analysis can claim nothing of such a nest
 without a finite range for that extent, so a record of it is restricted to a range, and the
 gate refuses a record restricted to a range: lowering for every extent on a claim about some
-would be an extrapolation. A C kernel therefore never passes the gate today, and `systolic-cc`
-is unchanged; the end-to-end check runs MLIR with static shapes through the same pipeline
+would be an extrapolation. A C kernel therefore never passes the gate today (until 2026-11-20: see "The fallback in
+systolic-cc"), and `systolic-cc` is unchanged; the end-to-end check runs MLIR with static shapes through the same pipeline
 (`systolic-opt`, `mlir-translate`, `llc`, the software runtime model) instead. What would lift
 this: a research proof that a claim does not depend on an extent that only bounds the accesses,
 or a front end that knows the extent.
@@ -1277,6 +1277,43 @@ refused, and on the day it no longer reaches the file the test fails once, to ha
 to the forbidden list. The test's other commands run the checker on small trees
 (`Inputs/layering`) that each break the rule one way. To forbid something else, or to guard
 another file, add to `RULES` in the script.
+
+### The fallback in systolic-cc (built 2026-11-20)
+
+`systolic-cc` now tries the Generalized GEMM after its own GEMM lowering, nest by nest, by
+default: a nest goes to the FPGA by the standard path when that path takes it, else from its
+record when the research verifies it and the record-driven lowering takes it, else it stays on
+the host. `--no-generalized-gemm` compiles as before (no front-end option, no records, the pass
+without them). This replaces "Why the C compiler gets no option" above.
+
+**What changed, and why each piece is there.**
+
+| Piece | What it does |
+| --- | --- |
+| `systolic-cfront --static-extents` | an array parameter written with a leading bound (`float A[64][16]`, `A[M][K]`, `A[restrict 64][16]`, `A[static 64]`) becomes `memref<EXTENTxKxf32>`, EXTENT being the leading extent the interface already gives (last row reached + 1), when every access's range is static and starts at row 0 or later. That is the extent `systolic-cc` builds the descriptor with, so the type says nothing the call does not; C does not enforce a declared bound, so the bound written is not used. A pointer declarator (`float (*A)[16]`, `A[][16]`), a subscript offset by a parameter, or a read before row 0 keeps `?`. This lifts the reason C kernels never passed the gate (a record of an open extent is restricted to a range) |
+| `systolic-cfront --modulo-subscripts` | a subscript `E % C`, E affine in the counters (no parameter), C a positive constant, E ≥ 0 at every point (checked by running the nest), becomes the affine expression `(E) mod C`; its range is exact (the nest is run). The affine recognizer has no view of it; the records' tables lower it |
+| `--affine-matmul-to-systolic="nest-records=FILE generalized-fallback=true"` | the pass runs every path it has without records first, with every option as given (`general-affine` included); then each outermost loop that is still as it was at the pass's input and in which the recognizer finds no GEMM is lowered from its record, as `record-driven` lowers it, where it stands. "Still as it was": `BoundNests(module, atInput)` recomputes each loop's binding now, at its ordinal in the input and over the roots numbered now, and keeps it only if text and hash equal the input's (an earlier nest lowered moves a loop's position; an erased loop's address may be reused). A nest the pass changed, lowered, or refused for a GEMM it recognized is never touched: a record never overrules a refusal. Code: `runGeneralizedMatmulFallback` in `GeneralizedMatmulToSystolic.cpp`, the option in `AffineMatmulToSystolic.cpp` |
+| `systolic-cc` | gives the front end both options; lowers once without records; for the translated functions with a GEMM site that lowering left, runs `generalized-gemm-nest-report --function=SYMBOL` (one run per function, `--index-bit-width=64`, every pair of roots named separate, `--max-level=1 --candidates-per-group=1 --timeout-ms=30000`, each run under `timeout` 300 s, `SYSTOLIC_CC_NEST_REPORT_TIMEOUT`), writes `10-nest-records.json`, and lowers again with the fallback; the second lowering of the offloaded functions reads the same file, and a function whose tile count differs between the two is refused. Without `--fp-reassociation` the tool is not run (nothing it verifies could be lowered). `--nest-records FILE` reads records made beforehand from the first lowering on. The fallback's remark ("GEMM … lowered from its record as R exact region(s)") is read like the standard one, so its sites get their `GEMM #N` reports |
+
+**The research tool is never linked.** `systolic-cc` runs it as an executable: `--nest-report
+PATH`, else `SYSTOLIC_NEST_REPORT`, else the path the build was configured with
+(`-DSYSTOLIC_NEST_REPORT=…`, empty by default), else next to `systolic-cc`, in the build's
+`bin/`, or on `PATH`. When none is found, or every run fails or times out, the fallback is
+skipped (a note with `--explain`) and the program is compiled as without it. The production
+build does not reference `research/`; `architecture_layering.mlir` still holds.
+
+**Naming every pair of roots separate is not an assumption the lowering rests on.** The
+research analysis records which names a claim rests on; the gate refuses a record resting on a
+name other than (A, C) or (B, C), and the lowering's alias check proves those two
+(`llvm.noalias`, i.e. `restrict`) itself before anything is lowered.
+
+**Limits.** Only nests in which the recognizer finds no GEMM; a function the standard path
+lowers in part keeps its other nests on the host unless they are such nests. The tool's cost
+is per function with a leftover GEMM site (seconds for a single 16×8×12 nest; some programs of
+the lit suite reach the per-run time limit, and are then compiled without the fallback). The
+records are of the program as the front end writes it; a binding that differs between the two
+lowerings is refused, never extrapolated. Runtime tables are still not built, so the domain must
+be static. Only `%` is new in the front end; other non-affine subscripts are still refused.
 
 ## The thesis
 

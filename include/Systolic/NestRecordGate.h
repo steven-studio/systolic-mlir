@@ -76,6 +76,14 @@ private:
 class BoundNests {
 public:
   explicit BoundNests(ModuleOp module);
+  /// The outermost loops of `module` as it stands now that are still the nests of
+  /// `atInput` (made before anything was lowered): of the same function, and with the
+  /// binding recomputed now, at the nest's ordinal in `atInput` and over the roots numbered
+  /// now, equal to its binding in `atInput` (text and hash). Every other loop is no nest of
+  /// the result: one the pass changed, one it made, or one that was no nest of `atInput`.
+  /// For the fallback after the pass's own paths (generalized-fallback), where nests before
+  /// a loop may have been lowered and its position among the outermost loops has moved.
+  BoundNests(ModuleOp module, const BoundNests &atInput);
 
   struct Nest {
     func::FuncOp function;

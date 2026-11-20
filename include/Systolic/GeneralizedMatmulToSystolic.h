@@ -80,6 +80,17 @@ using DenseMatmulLowering = llvm::function_ref<LogicalResult(
 /// lowered through a plan: set here from the module, advanced by `lowerOne` and by the
 /// lowering from records alike. A failure is the pass's failure; what failed has been
 /// reported on the module or on the nest.
+class BoundNests;
+
+/// generalized-fallback (docs/GENERALIZED_GEMM_SCOPE.md, "The fallback in systolic-cc"): run
+/// after the pass's own paths. Each outermost loop still as it was in `atInput` (the nests of
+/// the pass's input, BoundNests(module) made before anything ran) in which the dense
+/// recognizer finds no GEMM is lowered from its record in `options.nestRecords` (stage 3),
+/// where it stands; every other loop is left as it is. Fails when the file is no file of
+/// records or a lowering fails hard.
+LogicalResult runGeneralizedMatmulFallback(ModuleOp module, const GeneralizedMatmulOptions &options,
+                                           int64_t &nextGemmIndex, const BoundNests &atInput);
+
 LogicalResult runGeneralizedMatmulToSystolic(ModuleOp module,
                                              const GeneralizedMatmulOptions &options,
                                              int64_t &nextGemmIndex,

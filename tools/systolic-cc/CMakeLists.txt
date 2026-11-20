@@ -15,3 +15,14 @@ add_dependencies(systolic-cc systolic-cfront)
 # names one: the one this build was configured with (-DSYSTOLIC_CFRONT_CLANG).
 target_compile_definitions(systolic-cc PRIVATE
   SYSTOLIC_DEFAULT_CLANG="${SYSTOLIC_CFRONT_CLANG}")
+# The Generalized GEMM fallback's research tool (docs/GENERALIZED_GEMM_SCOPE.md,
+# "The fallback in systolic-cc"): an executable of the separate research build
+# (research/generalized-gemm), run by systolic-cc when neither --nest-report nor
+# SYSTOLIC_NEST_REPORT names one and none is next to it. Empty (the default):
+# not configured; systolic-cc then looks next to itself, in the build's bin/ and
+# on PATH, and skips the fallback when none is there. Nothing is linked: the
+# production build never depends on research/.
+set(SYSTOLIC_NEST_REPORT "" CACHE FILEPATH
+    "generalized-gemm-nest-report for systolic-cc's Generalized GEMM fallback")
+target_compile_definitions(systolic-cc PRIVATE
+  SYSTOLIC_DEFAULT_NEST_REPORT="${SYSTOLIC_NEST_REPORT}")
