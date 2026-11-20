@@ -440,3 +440,35 @@ void mlir::systolic::scatterTableResult(OpBuilder &builder, Location loc,
   copyByTable(builder, loc, tables.table[2], tables.flat[2], tables.matrix[2], tables.shape[2],
               /*scatter=*/true);
 }
+
+Value mlir::systolic::materializeGatherPack(OpBuilder &builder, Location loc, Value source,
+                                            ArrayRef<GatherPackDimension> dimensions,
+                                            std::array<int64_t, 2> shape, Type elementType) {
+  Value matrix = memref::AllocOp::create(builder, loc, MemRefType::get(shape, elementType));
+  auto rows = affine::AffineForOp::create(builder, loc, 0, shape[0], 1);
+  OpBuilder::InsertionGuard guard(builder);
+  builder.setInsertionPointToStart(rows.getBody());
+  auto columns = affine::AffineForOp::create(builder, loc, 0, shape[1], 1);
+  builder.setInsertionPointToStart(columns.getBody());
+  SmallVector<Value, 2> rc{rows.getInductionVar(), columns.getInductionVar()};
+  MLIRContext *context = builder.getContext();
+  SmallVector<Value, 2> index;
+  for (const GatherPackDimension &d : dimensions) {
+    AffineExpr expr = getAffineConstantExpr(d.base, context) +
+                      getAffineDimExpr(0, context) * d.coefficient[0] +
+                      getAffineDimExpr(1, context) * d.coefficient[1];
+    Value at = affine::AffineApplyOp::create(builder, loc, AffineMap::get(2, 0, expr), rc);
+    if (d.gathered) {
+      Value loaded = memref::LoadOp::create(builder, loc, d.table, ValueRange{at});
+      if (!loaded.getType().isIndex())
+        loaded = d.zeroExtend
+                     ? (Value)arith::IndexCastUIOp::create(builder, loc, builder.getIndexType(), loaded)
+                     : (Value)arith::IndexCastOp::create(builder, loc, builder.getIndexType(), loaded);
+      at = loaded;
+    }
+    index.push_back(at);
+  }
+  Value v = memref::LoadOp::create(builder, loc, source, index);
+  affine::AffineStoreOp::create(builder, loc, v, matrix, rc);
+  return matrix;
+}

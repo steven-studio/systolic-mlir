@@ -17,6 +17,7 @@
 #include "mlir/Interfaces/LoopLikeInterface.h"
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/CheckedArithmetic.h"
 #include "llvm/Support/raw_ostream.h"
@@ -1045,7 +1046,58 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
   SmallVector<Operation *, 1> stores;
   SmallVector<arith::MulFOp, 1> products;
   SmallVector<arith::AddFOp, 1> sums;
+  // Experimental (exp/semgus-indirect-dp): a gather load, dp[...], an integer or index load
+  // whose value, through at most one index_cast or index_castui, is used only as an index of
+  // memref.loads of the body: A[dp[i], k]. It is no access of the update; the formulas match
+  // it with the record's gather (below).
+  struct GatherValue {
+    memref::LoadOp load;
+    bool zeroExtend = false;
+  };
+  llvm::DenseMap<Value, GatherValue> gatherValues;
+  auto onlyIndexOfLoads = [&](Value v) {
+    if (v.use_empty())
+      return false;
+    for (OpOperand &use : v.getUses()) {
+      auto user = dyn_cast<memref::LoadOp>(use.getOwner());
+      if (!user || user->getBlock() != body || use.getOperandNumber() == 0)
+        return false;
+    }
+    return true;
+  };
+  // Only a record that gathers lets a load be read so: without one, every nest is read as it
+  // was, and a load in an address is refused as before.
+  bool recordGathers = false;
+  if (const json::Object *views = gemm.getObject("views"))
+    for (const char *name : {"A", "B"})
+      if (const json::Object *one = views->getObject(name))
+        if (const json::Array *dimensions = one->getArray("dimensions"))
+          for (const json::Value &dimension : *dimensions)
+            if (const json::Object *object = dimension.getAsObject())
+              recordGathers = recordGathers || object->getObject("gather");
   for (Operation &op : body->without_terminator()) {
+    auto load = dyn_cast<memref::LoadOp>(op);
+    if (!recordGathers || !load || !load.getType().isSignlessIntOrIndex())
+      continue;
+    Value result = load.getResult();
+    if (onlyIndexOfLoads(result) && result.getType().isIndex()) {
+      gatherValues[result] = {load, false};
+      continue;
+    }
+    if (!result.hasOneUse())
+      continue;
+    Operation *cast = *result.getUsers().begin();
+    if (cast->getBlock() != body || !isa<arith::IndexCastOp, arith::IndexCastUIOp>(cast) ||
+        !onlyIndexOfLoads(cast->getResult(0)))
+      continue;
+    gatherValues[cast->getResult(0)] = {load, isa<arith::IndexCastUIOp>(cast)};
+  }
+  llvm::SmallPtrSet<Operation *, 2> gatherLoads;
+  for (auto &[value, gather] : gatherValues)
+    gatherLoads.insert(gather.load);
+  for (Operation &op : body->without_terminator()) {
+    if (gatherLoads.contains(&op))
+      continue;
     if (isa<memref::LoadOp, affine::AffineLoadOp>(op))
       loads.push_back(&op);
     else if (isa<memref::StoreOp, affine::AffineStoreOp>(op))
@@ -1197,7 +1249,20 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
                     " is no memref of static shape and the identity layout over the update's element type");
   }
 
-  // The separations the record rests on: proofs by an allocation, or (A, C) and (B, C).
+  // Experimental: the roots the nest gathers from (dp). Neither A, B nor C.
+  llvm::SmallVector<int64_t, 1> gatherRootNumbers;
+  for (auto &[value, gather] : gatherValues) {
+    const int64_t number = rootOf(gather.load.getMemRef());
+    if (number < 0)
+      return refuse("the nest gathers from a memref that is no root of the function");
+    if (number == rootNumber[0] || number == rootNumber[1] || number == rootNumber[2])
+      return refuse("the nest gathers from an operand of the update");
+    if (!llvm::is_contained(gatherRootNumbers, number))
+      gatherRootNumbers.push_back(number);
+  }
+
+  // The separations the record rests on: proofs by an allocation, or (A, C) and (B, C), and,
+  // with a gather, (dp, C).
   const json::Array *separations = fields.array(record, "separation", "nest");
   if (!separations)
     return refuse("");
@@ -1225,7 +1290,8 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
     }
     if (*kind != "assumption")
       return refuse("the record rests on a separation it does not know (" + *kind + ")");
-    if (!is(rootNumber[0], rootNumber[2]) && !is(rootNumber[1], rootNumber[2]))
+    bool gatherPair = llvm::any_of(gatherRootNumbers, [&](int64_t g) { return is(g, rootNumber[2]); });
+    if (!is(rootNumber[0], rootNumber[2]) && !is(rootNumber[1], rootNumber[2]) && !gatherPair)
       return refuse("the record assumes roots " + std::to_string(*a) + " and " + std::to_string(*b) +
                     " apart, and the lowering checks only A and B against C");
   }
@@ -1239,15 +1305,21 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
   out.where = at.where;
   for (unsigned x = 0; x < 3; ++x)
     out.operands[x].memref = access[x].memref;
+  for (auto &[value, gather] : gatherValues)
+    if (!llvm::is_contained(out.gatherTables, gather.load.getMemRef()))
+      out.gatherTables.push_back(gather.load.getMemRef());
 
   // The record's affine closed form of dimension d of operand x, over the band's counters
   // (the record's levels are the band's loops, checked above). Failure when the record has
   // none: no such dimension, not affine, a parameter, anything ill-formed. Reads only.
+  std::function<LogicalResult(const json::Object *, Form &)> objectForm;
   auto recordForm = [&](unsigned x, unsigned d, Form &form) -> LogicalResult {
     const json::Array *dimensions = view[x]->getArray("dimensions");
     if (!dimensions || d >= dimensions->size())
       return failure();
-    const json::Object *dimension = (*dimensions)[d].getAsObject();
+    return objectForm((*dimensions)[d].getAsObject(), form);
+  };
+  objectForm = [&](const json::Object *dimension, Form &form) -> LogicalResult {
     if (!dimension)
       return failure();
     std::optional<bool> affine = dimension->getBoolean("affine");
@@ -1315,6 +1387,120 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
       const char *name = kOperandName[x];
       if (!proved(x))
         return refuse(std::string("the record does not prove the view of ") + name);
+      // Experimental: an operand read at a gathered index, A[dp[i], k]: each dimension is the
+      // record's affine form or the record's gather, the nest's own; the operand is then
+      // packed, matrix[r][c] = A[...], and the tiles read the matrix.
+      if (x != 2 && !access[x].map &&
+          llvm::any_of(access[x].operands, [&](Value v) { return gatherValues.count(v); })) {
+        const int64_t rank = type[x].getRank();
+        const json::Array *dimensions = view[x]->getArray("dimensions");
+        if (!dimensions || (int64_t)dimensions->size() != rank)
+          return refuse(std::string("the record's view of ") + name + " does not have the rank of " + name);
+        // A form over the band's counters as (base, coefficient over the operand's roles).
+        auto overRoles = [&](const Form &f, std::array<int64_t, 2> &coefficient, int64_t &base,
+                             std::string &problem) -> bool {
+          coefficient = {0, 0};
+          std::optional<int64_t> b = f.constant;
+          for (unsigned p = 0; p < 3; ++p) {
+            if (f.coefficient[p] == 0)
+              continue;
+            int role = -1;
+            for (int r = 0; r < 2; ++r)
+              if (levelOf[kRolesOf[x][r]] == p)
+                role = r;
+            if (role < 0) {
+              problem = "reads the loop of a coordinate that is none of its roles";
+              return false;
+            }
+            coefficient[role] = f.coefficient[p];
+            std::optional<int64_t> term = llvm::checkedMul(f.coefficient[p], lower[kRolesOf[x][role]]);
+            b = b && term ? llvm::checkedAdd(*b, *term) : std::nullopt;
+          }
+          if (!b) {
+            problem = "overflows 64-bit arithmetic";
+            return false;
+          }
+          base = *b;
+          return true;
+        };
+        // The index's range over the box, inside [0, size).
+        auto inside = [&](const std::array<int64_t, 2> &coefficient, int64_t base, int64_t size) {
+          std::optional<int64_t> lo = base, hi = base;
+          for (int r = 0; r < 2; ++r) {
+            std::optional<int64_t> span = llvm::checkedMul(coefficient[r], extent[kRolesOf[x][r]] - 1);
+            if (!span || !lo || !hi)
+              return false;
+            lo = llvm::checkedAdd(*lo, std::min<int64_t>(*span, 0));
+            hi = llvm::checkedAdd(*hi, std::max<int64_t>(*span, 0));
+          }
+          return lo && hi && *lo >= 0 && *hi < size;
+        };
+        SmallVector<DrivenOperand::DrivenGather, 2> pack;
+        for (int64_t d = 0; d < rank; ++d) {
+          const std::string where = "dimension " + std::to_string(d) + " of " + name;
+          const json::Object *dimension = (*dimensions)[d].getAsObject();
+          const json::Object *gather = dimension ? dimension->getObject("gather") : nullptr;
+          Value index = access[x].operands[d];
+          DrivenOperand::DrivenGather one;
+          std::string problem;
+          auto found = gatherValues.find(index);
+          if (found == gatherValues.end()) {
+            if (gather)
+              return refuse("the record gathers " + where + ", and the nest does not");
+            Form mine;
+            std::optional<Form> theirs = forms.of(index);
+            if (failed(recordForm(x, d, mine)) || !theirs || !(mine == *theirs))
+              return refuse("the record's form of " + where + " is not the nest's index");
+            if (!overRoles(*theirs, one.coefficient, one.base, problem))
+              return refuse(where + " " + problem);
+            if (!inside(one.coefficient, one.base, type[x].getDimSize(d)))
+              return refuse(std::string(name) + " is read out of bounds along dimension " + std::to_string(d));
+            pack.push_back(one);
+            continue;
+          }
+          // The gather: the record's root, extension, element and index are the nest's.
+          if (!gather)
+            return refuse("the nest gathers " + where + ", and the record does not");
+          memref::LoadOp load = found->second.load;
+          auto tableType = dyn_cast<MemRefType>(load.getMemRef().getType());
+          const json::Object *gatherRoot = gather->getObject("root");
+          std::optional<int64_t> gatherRootNumber = gatherRoot ? gatherRoot->getInteger("root") : std::nullopt;
+          std::optional<StringRef> extend = gather->getString("extend");
+          std::optional<StringRef> elementText = gather->getString("element");
+          const json::Array *gatherIndex = gather->getArray("index");
+          if (!gatherRootNumber || !extend || !elementText || !gatherIndex)
+            return refuse("the record is incomplete: the gather of " + where);
+          if (*gatherRootNumber != rootOf(load.getMemRef()))
+            return refuse("the record gathers " + where + " from root " + std::to_string(*gatherRootNumber) +
+                          ", and the nest from root " + std::to_string(rootOf(load.getMemRef())));
+          if (!tableType || !tableType.hasStaticShape() || !tableType.getLayout().isIdentity() ||
+              tableType.getRank() != 1 || gatherIndex->size() != 1)
+            return refuse("the nest gathers " + where + " from no one-dimensional memref of static shape");
+          const bool isIndex = load.getType().isIndex();
+          const unsigned width = isIndex ? indexWidth : load.getType().getIntOrFloatBitWidth();
+          const char *nestExtend = isIndex ? "none" : found->second.zeroExtend ? "zext" : "sext";
+          if (*elementText != "bv" + std::to_string(width) || *extend != nestExtend)
+            return refuse("the record's gather of " + where + " is " + *extend + " of " + *elementText +
+                          ", and the nest's is " + nestExtend + " of bv" + std::to_string(width));
+          Form mine;
+          std::optional<Form> theirs = forms.of(load.getIndices()[0]);
+          if (failed(objectForm((*gatherIndex)[0].getAsObject(), mine)) || !theirs || !(mine == *theirs))
+            return refuse("the record's index of the gather of " + where + " is not the nest's");
+          if (!overRoles(*theirs, one.coefficient, one.base, problem))
+            return refuse("the gather of " + where + " " + problem);
+          if (!inside(one.coefficient, one.base, tableType.getDimSize(0)))
+            return refuse("the gather of " + where + " reads its table out of bounds");
+          one.gathered = true;
+          one.table = load.getMemRef();
+          one.zeroExtend = found->second.zeroExtend;
+          pack.push_back(one);
+        }
+        out.operands[x].pack = std::move(pack);
+        // The tiles read the packed rows x columns matrix as it is.
+        out.operands[x].dimensions.push_back({0, 1, 0});
+        out.operands[x].dimensions.push_back({1, 1, 0});
+        continue;
+      }
       SmallVector<Form, 2> nest;
       if (!indexForms(access[x], nest))
         return refuse(std::string("the nest reads ") + name +
@@ -1438,6 +1624,8 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
       out.operands[x].elementStrides = {*stride[0], *stride[1]};
     }
     out.summary = "formulas: the record's views of A, B and C are the nest's own index arithmetic";
+    if (!out.gatherTables.empty())
+      out.summary += "; A or B packed by the record's gather before the tiles";
     return out;
   }
 

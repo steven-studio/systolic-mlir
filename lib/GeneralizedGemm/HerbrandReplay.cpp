@@ -187,7 +187,14 @@ bool Machine::layout() {
     shapes.push_back(std::move(shape));
     // A fresh allocation has no value: a read of it stops, as in G1.
     std::vector<NodeId> contents(cells, None);
-    if (root.origin == MemoryRoot::FunctionArgument)
+    if (isGatherRoot(program, root.id)) {
+      // A gather root's contents are addresses: fixed, in bounds, so the addresses they
+      // give are concrete. The replay is then about these contents of the gather roots and
+      // every content of the others.
+      uint64_t modulus = gatherFillModulus(program);
+      for (uint64_t c = 0; c < cells; ++c)
+        contents[c] = table.constant(APInt(root.sort.width, c % modulus), false);
+    } else if (root.origin == MemoryRoot::FunctionArgument)
       for (uint64_t c = 0; c < cells; ++c)
         contents[c] = table.leaf(InitialCell, root.id, c);
     memory.push_back(std::move(contents));

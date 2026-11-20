@@ -518,7 +518,7 @@ DomainEvidence domainEvidenceFromRun(const SemanticProgram &program,
                           ", so it does not enumerate D";
     return evidence;
   }
-  if (!program.controlOblivious || !program.addressOblivious) {
+  if (!traceOblivious(program)) {
     // The trace depends on memory contents, so a parameter point does not
     // determine it and a parameter scope would overstate the evidence.
     evidence.provenance = "the trace depends on memory contents";

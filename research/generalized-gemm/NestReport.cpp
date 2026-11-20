@@ -48,6 +48,9 @@ static cl::opt<unsigned> candidatesPerGroup("candidates-per-group", cl::init(2))
 static cl::opt<uint64_t> replaySteps("replay-steps", cl::init(1u << 22));
 static cl::opt<uint64_t> replayNodes("replay-nodes", cl::init(1u << 23));
 static cl::opt<unsigned> maxQueries("max-queries", cl::init(4000));
+static cl::opt<bool> admitGather(
+    "admit-gather", cl::init(false),
+    cl::desc("Experimental: admit A[dp[i], k], dp a read-only root, as an oblivious address"));
 static cl::opt<bool> indexInvariants(
     "index-invariants", cl::init(false),
     cl::desc("search for inductive invariants over the integer state at each nest's loop headers and hand "
@@ -83,6 +86,7 @@ int main(int argc, char **argv) {
   options.candidatesPerGroup = candidatesPerGroup;
   options.maxQueries = maxQueries;
   options.indexInvariants = indexInvariants;
+  options.admitGather = admitGather;
   {
     llvm::SmallVector<llvm::StringRef> items;
     llvm::StringRef(scopeText).split(items, ',', -1, /*KeepEmpty=*/false);

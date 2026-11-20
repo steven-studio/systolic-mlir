@@ -52,11 +52,14 @@ namespace {
 /// A bound or guard: integer operations over parameters and level variables below
 /// `levels`, with nothing from memory, poison or state.
 bool levelTermOk(const SemanticProgram &program, Term term, unsigned levels,
-                 const std::vector<Sort> &sorts, std::string &why) {
+                 const std::vector<Sort> &sorts, std::string &why, bool gatherLoads = false) {
   llvm::DenseSet<Term> seen;
   std::function<bool(Term)> visit = [&](Term n) {
     if (!seen.insert(n).second)
       return true;
+    // A view (never a bound or guard) may read a gather root: dp[level].
+    if (gatherLoads && n->op == TermOp::Load && gatherLoadsOnly(program, n))
+      return llvm::all_of(llvm::ArrayRef<Term>(n->args).drop_front(), visit);
     if (n->sort.kind != Sort::BV) {
       why = "a bound or guard holds a non-integer";
       return false;
@@ -193,11 +196,12 @@ std::optional<GuardedOrder> adoptGuardedOrder(const SemanticProgram &program,
 }
 
 bool isLevelTerm(const SemanticProgram &program, const GuardedOrder &order, Term term,
-                 unsigned levels, std::string &why) {
+                 unsigned levels, std::string &why, bool gatherLoads) {
   std::vector<Sort> sorts;
   for (const GuardedLevel &level : order.levels)
     sorts.push_back(level.value->sort);
-  return term && levelTermOk(program, term, std::min<unsigned>(levels, sorts.size()), sorts, why);
+  return term && levelTermOk(program, term, std::min<unsigned>(levels, sorts.size()), sorts, why,
+                             gatherLoads);
 }
 
 Term bindLevels(const SemanticProgram &program, Term term, ArrayRef<Term> values) {
@@ -417,9 +421,23 @@ bool proveSegmentedOrbit(const SemanticProgram &program, ArrayRef<GuardedOrder> 
   return true;
 }
 
-std::optional<APInt> evaluateLevelTerm(Term t, ArrayRef<APInt> parameters, ArrayRef<APInt> levels) {
-  auto arg = [&](unsigned i) { return evaluateLevelTerm(t->args[i], parameters, levels); };
+std::optional<APInt> evaluateLevelTerm(Term t, ArrayRef<APInt> parameters, ArrayRef<APInt> levels,
+                                       const SemanticProgram *gather) {
+  auto arg = [&](unsigned i) { return evaluateLevelTerm(t->args[i], parameters, levels, gather); };
   switch (t->op) {
+  case TermOp::Load: {
+    if (!gather || !gatherLoadsOnly(*gather, t))
+      return std::nullopt;
+    const MemoryRoot &root = gather->roots[t->args[0]->sort.root];
+    uint64_t cell = 0;
+    for (unsigned d = 0; d + 1 < t->args.size(); ++d) {
+      auto index = arg(d + 1);
+      if (!index || root.extents[d] < 0 || index->uge((uint64_t)root.extents[d]))
+        return std::nullopt;
+      cell = cell * (uint64_t)root.extents[d] + index->getZExtValue();
+    }
+    return APInt(t->sort.width, cell % gatherFillModulus(*gather));
+  }
   case TermOp::Const:
     return t->value;
   case TermOp::Param:

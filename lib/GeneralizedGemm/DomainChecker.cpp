@@ -102,7 +102,7 @@ Fact unknownFact(std::string detail) {
 }
 
 bool traceIsFixed(const SemanticProgram &program, std::string &why) {
-  if (!program.controlOblivious || !program.addressOblivious) {
+  if (!traceOblivious(program)) {
     why = "the trace depends on memory contents";
     return false;
   }
@@ -302,7 +302,8 @@ std::optional<Structure> adoptRequest(const SemanticProgram &program, const Coor
   out.keyAll = out.key.size() == out.order.levels.size();
   for (unsigned view = 0; view < 3; ++view)
     for (Term term : request.access[view])
-      if (!isLevelTerm(program, out.order, term, out.order.levels.size(), why))
+      if (!isLevelTerm(program, out.order, term, out.order.levels.size(), why,
+                       /*gatherLoads=*/program.admitGather))
         return std::nullopt;
   bool anyRepeat = llvm::is_contained(out.repeat, true), readsLogical = false;
   if (!anyRepeat) {
@@ -504,7 +505,7 @@ CheckedDomain finiteClaim(const SemanticProgram &program, const DomainEnumeratio
       for (size_t e = 0; e < lambdas.size() && accessHolds[view]; ++e) {
         bool same = form.size() == views[view][e].size();
         for (unsigned n = 0; same && n < form.size(); ++n) {
-          auto value = evaluateLevelTerm(form[n], v, lambdas[e]);
+          auto value = evaluateLevelTerm(form[n], v, lambdas[e], &program);
           same = value && *value == views[view][e][n];
         }
         if (!same) {
@@ -870,7 +871,7 @@ CheckedDomain finiteSegmentedOver(const SemanticProgram &program, const DomainEn
           const std::vector<APInt> &index = view == 0 ? event.h : view == 1 ? event.f : event.g;
           bool same = form.size() == index.size();
           for (unsigned n = 0; same && n < form.size(); ++n) {
-            auto value = evaluateLevelTerm(form[n], v, rows[row].lambda);
+            auto value = evaluateLevelTerm(form[n], v, rows[row].lambda, &program);
             same = value && *value == index[n];
           }
           if (!same) {

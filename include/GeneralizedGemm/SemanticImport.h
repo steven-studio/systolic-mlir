@@ -33,6 +33,9 @@ struct ImportOptions {
   // refuses such functions rather than choosing one (invariant I1).
   unsigned indexBitWidth = 0;
   bool lowerStructured = false;
+  // Experimental: admit one-level gathers from read-only roots as oblivious addresses
+  // (SemanticProgram::addressGather). Not part of the fingerprint: it changes no term.
+  bool admitGather = false;
   ImportLimits limits;
 };
 

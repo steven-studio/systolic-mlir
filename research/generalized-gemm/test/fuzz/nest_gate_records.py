@@ -27,6 +27,9 @@ test/Systolic/Inputs, written by this script from the tool's own output and noth
   nest_records_carried_tables_searchless.json  of the same file without --index-invariants
   nest_records_carried_refusals.json  of test/Systolic/nest_records_carried_refusals.mlir, with
                                   --index-invariants
+  nest_records_gather.json        of test/Systolic/nest_records_gather.mlir (experimental: A[dp[i], k]),
+                                  with --admit-gather
+  nest_records_gather_off.json    of the same file without --admit-gather
 
 Each file holds the tool's JSON, one function object per line. The solver's resource limit,
 not its time limit, decides every query, so the tool says the same of the same input on a
@@ -58,6 +61,7 @@ WHILE_REFUSALS = "test/Systolic/nest_records_while_refusals.mlir"
 CARRIED = "test/Systolic/nest_records_carried.mlir"
 CARRIED_REFUSALS = "test/Systolic/nest_records_carried_refusals.mlir"
 CARRIED_TABLES = "test/Systolic/nest_records_carried_tables.mlir"
+GATHER = "test/Systolic/nest_records_gather.mlir"
 SEARCH = "--index-invariants"
 INPUTS = "test/Systolic/Inputs"
 OPTIONS = ["--max-level=1", "--candidates-per-group=1", "--timeout-ms=120000", "--rlimit=20000000"]
@@ -67,7 +71,8 @@ NAMES = ["nest_records.json", "nest_records_unauthorized.json", "nest_records_wi
          "nest_records_driven_refusals.json", "nest_records_scf.json", "nest_records_scf_refusals.json",
          "nest_records_while.json", "nest_records_while_refusals.json", "nest_records_carried.json",
          "nest_records_carried_searchless.json", "nest_records_carried_refusals.json",
-         "nest_records_carried_tables.json", "nest_records_carried_tables_searchless.json"]
+         "nest_records_carried_tables.json", "nest_records_carried_tables_searchless.json",
+         "nest_records_gather.json", "nest_records_gather_off.json"]
 
 
 def records(driver, cwd, arguments, test=TEST):
@@ -109,7 +114,9 @@ def make(driver, root, out, workers=0, only=()):
                 (root, ["--index-bit-width=64", EVERY_PAIR], CARRIED),
                 (root, ["--index-bit-width=64", EVERY_PAIR, SEARCH], CARRIED_REFUSALS),
                 (root, ["--index-bit-width=64", EVERY_PAIR, SEARCH], CARRIED_TABLES),
-                (root, ["--index-bit-width=64", EVERY_PAIR], CARRIED_TABLES)]
+                (root, ["--index-bit-width=64", EVERY_PAIR], CARRIED_TABLES),
+                (root, ["--index-bit-width=64", EVERY_PAIR, "--admit-gather"], GATHER),
+                (root, ["--index-bit-width=64", EVERY_PAIR], GATHER)]
         chosen = [(name, job) for name, job in zip(NAMES, jobs) if not only or name in only]
         with ThreadPoolExecutor(max_workers=workers or len(chosen)) as pool:
             texts = list(pool.map(lambda item: records(driver, *item[1]), chosen))

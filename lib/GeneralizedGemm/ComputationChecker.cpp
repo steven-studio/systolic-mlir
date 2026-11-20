@@ -117,7 +117,7 @@ bool sameEffect(const MemoryEffect &a, const MemoryEffect &b) {
 /// Control and addresses read neither memory nor a float parameter. The same gate
 /// as the enumeration, since a symbolic claim passes no enumeration.
 bool traceIsFixed(const SemanticProgram &program, std::string &why) {
-  if (!program.controlOblivious || !program.addressOblivious) {
+  if (!traceOblivious(program)) {
     why = "the trace depends on memory contents";
     return false;
   }

@@ -598,6 +598,10 @@ std::optional<Fitted> fitOrder(const SemanticProgram &program, const std::vector
         std::vector<APInt> levels;
         for (unsigned c : use)
           levels.push_back(s.values[e][c]);
+        // A gather view, dp[level], reads memory the samples do not keep: the checker
+        // proves it or the view is not proved.
+        if (containsOp(form, TermOp::Load))
+          return gatherLoadsOnly(program, form);
         auto value = evaluateLevelTerm(form, s.parameters, levels);
         if (!value || *value != index[d])
           return false;
@@ -613,7 +617,7 @@ std::optional<Fitted> fitOrder(const SemanticProgram &program, const std::vector
     bool ok = true;
     for (unsigned d = 0; d < index.size() && ok; ++d) {
       Term term = applyIdentities(terms, index[d], limits.identities);
-      bool overLevels = !containsOp(term, TermOp::Load);
+      bool overLevels = !containsOp(term, TermOp::Load) || gatherLoadsOnly(program, term);
       for (unsigned id : stateSupport(term))
         overLevels = overLevels && levelOfState.count(id);
       Term chosen = nullptr;

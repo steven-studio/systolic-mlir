@@ -43,7 +43,7 @@ std::optional<GuardedOrder> adoptGuardedOrder(const SemanticProgram &program,
 /// Whether `term` reads only parameters and level variables below `levels`, with integer
 /// operations alone. For bounds, guards and proposed closed forms.
 bool isLevelTerm(const SemanticProgram &program, const GuardedOrder &order, Term term,
-                 unsigned levels, std::string &why);
+                 unsigned levels, std::string &why, bool gatherLoads = false);
 
 /// `term` with each level variable replaced by the matching entry of `values`.
 Term bindLevels(const SemanticProgram &program, Term term, llvm::ArrayRef<Term> values);
@@ -81,8 +81,11 @@ bool proveSegmentedOrbit(const SemanticProgram &program, llvm::ArrayRef<GuardedO
 
 /// A term over parameters and levels at one point. Nullopt for any other leaf or an
 /// operation outside the integer fragment.
+/// With `gather`, a gather load of that program (gatherLoadsOnly) has the contents the
+/// replays give its root (gatherFillModulus): a sample of the gather, never all of them.
 std::optional<llvm::APInt> evaluateLevelTerm(Term term, llvm::ArrayRef<llvm::APInt> parameters,
-                                             llvm::ArrayRef<llvm::APInt> levels);
+                                             llvm::ArrayRef<llvm::APInt> levels,
+                                             const SemanticProgram *gather = nullptr);
 bool concreteLess(const GuardedOrder &order, llvm::ArrayRef<llvm::APInt> a,
                   llvm::ArrayRef<llvm::APInt> b);
 

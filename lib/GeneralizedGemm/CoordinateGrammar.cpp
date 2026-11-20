@@ -299,9 +299,13 @@ void Builder::leaves() {
       offer(terms.state(s.id, s.sort), 1, /*leaf=*/true);
 
   // The subterms of the accesses: what the program itself computes.
+  // A subterm that reads memory (dp[i] of a gather, SemanticProgram::addressGather) is no
+  // coordinate: the events carry no memory, and the checkers refuse a coordinate that reads
+  // it. Its index is still offered. Programs without a gather have no such subterm.
   std::function<void(Term)> subterms = [&](Term term) {
     if (term->sort.kind == Sort::BV && term->sort.width > 1 &&
-        term->op != TermOp::Const && term->op != TermOp::Param)
+        term->op != TermOp::Const && term->op != TermOp::Param &&
+        !containsOp(term, TermOp::Load))
       offer(term, 1);
     for (Term arg : term->args)
       subterms(arg);

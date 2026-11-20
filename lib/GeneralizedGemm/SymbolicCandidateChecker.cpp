@@ -508,7 +508,7 @@ CheckedFamily checkFamilySymbolic(const SemanticProgram &program,
                                   const SymbolicCheckOptions &options, SmtBackend &backend) {
   if (!program.isSupported())
     return CheckedFamily::unknown("the program is unsupported");
-  if (!program.controlOblivious || !program.addressOblivious)
+  if (!traceOblivious(program))
     return CheckedFamily::unknown("the trace depends on memory contents");
   // A claim about part of a group is no claim about its events: the group must be every
   // direct site of this root triple, each a site of the program. One gate for G3b, G4a

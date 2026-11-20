@@ -303,3 +303,79 @@ ninja -C <build> check-generalized-gemm
 python3 research/generalized-gemm/test/fuzz/synthesis_mutation.py --source . \
   --scratch <empty dir> --llvm-dir $L/lib/cmake/llvm --mlir-dir $L/lib/cmake/mlir
 ```
+
+## Experimental: one-level gathers (`--admit-gather`, branch exp/semgus-indirect-dp)
+
+Off by default. Without the option every output is byte-identical: the 16 record files of
+`nest_gate_records.py --check` are unchanged, and so is `check-systolic`. With
+`generalized-gemm-nest-report --admit-gather` (`NestAnalysisOptions::admitGather`,
+`ImportOptions::admitGather`), a nest such as
+
+```mlir
+%t = memref.load %dp[%i] : memref<16xi32>
+%r = arith.index_cast %t : i32 to index
+%x = memref.load %a[%r, %k] : memref<32x12xf32>   // C[i, j] += A[dp[i], k] * B[k, j]
+```
+
+is analysed as an oblivious program, and its record can be VERIFIED. `dp` stands for a
+read-only integer index array at run time: MoE's `sorted_token_ids`, a BSR `col_idx`.
+
+**What is admitted.** The importer computes `SemanticProgram::addressGather`: every
+address that depends on memory does so only through a Load from a root that no block
+writes, read at its entry memory, at an index that reads no memory and no memory-dependent
+state. `dp[dp[i]]` is refused (the inner index reads memory), and so is a gather in a
+guard (control is not oblivious). `traceOblivious(program)` replaces the five
+`controlOblivious && addressOblivious` gates (finite enumeration, G3b symbolic, G4a, G5,
+concrete evaluation).
+
+**Where `dp[E]` lives.** In the view grammar, not in the coordinate grammar. The
+coordinates of `A[dp[i], k]` are still I = i, J = j, K = k. `dp` appears only in the view
+F = (dp[i], k), which G3b already allows to be non-injective. The coordinate grammar skips
+any subterm with a Load: a coordinate that reads memory would break Theorem 7 and the
+two-copy argument of `adopted()`. The view proposer (DomainProposer) accepts
+`[sext|zext] Load(dp, level form)`, and A1 proves it at the symbolic tier. No Injective(dp)
+premise is needed: V1f holds by congruence, because both copies share dp's one memory.
+
+**Why the claims stay sound.** A gather root is never written, so a load from it is a
+function of its index for the whole run, provided dp does not alias a root that is
+written. That separation is an assumption the record names: with C as the output,
+"roots dp and C are separate ... used by the computation claim". A dp entry that
+addresses outside A stops the run on out-of-bounds UB. The claims cover the runs that
+complete (`PROVEN_TERMINATING_IF_DEFINED`), so no separate bound premise is added.
+
+**Finite evidence.** The samples carry no memory. Wherever a finite check or replay needs
+dp's contents (the enumeration's entry memory, the Herbrand replay, `evaluateLevelTerm`
+with `gather`), it gives cell c of a gather root the value c mod `gatherFillModulus`: the
+smallest static extent that a gathered index addresses, so every sampled address is in
+bounds. That is a sample, as the finite tiers always are. The symbolic tiers quantify
+over every dp.
+
+**The record.** A gathered dimension of a view has `"affine": false` and a `"gather"`
+object: the gather root (as `root` everywhere else), `"element": "bvN"`,
+`"extend": "sext" | "zext" | "none"`, and `"index"`, one affine dimension per dimension of
+the root, in the format of every other dimension (levels, roles, offset). The object is
+written only for a gather, so no other record changes. A gather is mapped when every
+index is an affine form of the roles of its operand. Then the status is VERIFIED.
+
+**The lowering** (`--affine-matmul-to-systolic="nest-records=FILE record-driven=true"`,
+`Systolic/NestRecordLowering.h`). A body load is read as a gather only when the record
+gathers. Such a load is an integer or index load whose value, through at most one
+`index_cast` or `index_castui`, is used only as an index of loads of the body. The
+lowering checks the record's root, extension, element width and index form against the
+nest, and checks that dp is read in bounds. It accepts the separation (dp, C) and checks
+dp against C in its alias gate, as it does A and B. Before the tiles it emits
+`A_packed[r][c] = A[dp[f(r, c)], g(r, c)]` (`materializeGatherPack`, two affine.for), and
+the tiles run on that dense matrix. The systolic schedule is unchanged.
+
+**Validation (2026-11-20, base 3fbe627; first on d21e842).** `check-systolic` 223/223: the
+222 tests of the base and `nest_records_gather.mlir` (on d21e842, 206/206). `nest_gate_records.py --check` covers 18 files, all
+identical: the 16 of the base and the two gather records. The G1 to G5 unit suites and
+the research lit pass. End to end on the software runtime model (sync and async), the
+`gather` (sext) and `gather_unsigned` (zext) functions, with a dp that repeats rows, give
+every one of their 128 cells bit for bit, in 5 invocations, as the remarks announce. Not
+run: the fuzz program suites, the mutation harness, the FPGA board, and any Triton
+codegen.
+
+**Limits.** One level, a one-dimensional dp of static shape, read-only for the whole
+nest, and no gather into C (a scatter would need Injective(dp) for C1). The bounds of
+`A[dp[i]]` are the program's own: the lowering reads the same addresses as the nest.

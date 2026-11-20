@@ -64,6 +64,9 @@ struct NestAnalysisOptions {
   /// certificate checker accepts it, and the identities for the views
   /// (handIndexInvariants). Off by default, and then a record is what it was.
   bool indexInvariants = false;
+  /// Experimental (exp/semgus-indirect-dp): admit one-level gathers from read-only roots,
+  /// A[dp[i], k], as oblivious addresses (SemanticProgram::addressGather). Off by default.
+  bool admitGather = false;
 };
 
 /// What the search for index invariants gave a nest's analysis. Not a verdict of the
@@ -100,6 +103,17 @@ struct NestViewDimension {
   /// every level it reads ascends from a constant.
   std::optional<int64_t> offset;
   std::vector<std::pair<char, int64_t>> roles; // Axis, scale.
+  /// Experimental (exp/semgus-indirect-dp): the dimension is a gather, root[index...],
+  /// extended to the index width: dp[i] of A[dp[i], k]. Set only for a program that admits
+  /// gathers; `affine` is then false and `index` holds one affine dimension per
+  /// dimension of the gather root.
+  struct Gather {
+    int root = -1;             // The function's root id.
+    unsigned elementWidth = 0; // The bits of the root's element.
+    std::string extend;        // "sext", "zext" or "none".
+    std::vector<NestViewDimension> index;
+  };
+  std::optional<Gather> gather;
 };
 
 struct NestView {

@@ -266,6 +266,29 @@ TableOperands materializeTableOperands(OpBuilder &builder, Location loc,
 /// matrix (writeBackMatmulResult).
 void scatterTableResult(OpBuilder &builder, Location loc, const TableOperands &tables);
 
+/// Experimental (exp/semgus-indirect-dp). One dimension of the memref a packed operand is
+/// read from: its index at the matrix's element (row, column) is
+/// base + coefficient[0] * row + coefficient[1] * column, or, when `gathered`, the value of
+/// the one-dimensional integer memref `table` at that index, extended to index (index_cast,
+/// or index_castui with `zeroExtend`): A[dp[i], k].
+struct GatherPackDimension {
+  bool gathered = false;
+  Value table;
+  bool zeroExtend = false;
+  std::array<int64_t, 2> coefficient{0, 0};
+  int64_t base = 0;
+};
+
+/// A rows x columns memref.alloc of `elementType`, filled at the builder's point by two
+/// affine.for: matrix[r][c] = source[index_0(r, c), ...], one GatherPackDimension per
+/// dimension of `source`. The packed matrix is a plain dense operand for the tiles. Like
+/// the tables' matrices, it is freed by --systolic-runtime-to-llvm's buffer deallocation.
+/// The caller has checked every affine index and every table index against its memref; the
+/// gathered indices are the program's own and are read as the nest reads them.
+Value materializeGatherPack(OpBuilder &builder, Location loc, Value source,
+                            ArrayRef<GatherPackDimension> dimensions,
+                            std::array<int64_t, 2> shape, Type elementType);
+
 } // namespace systolic
 } // namespace mlir
 

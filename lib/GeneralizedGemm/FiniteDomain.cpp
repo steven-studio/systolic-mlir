@@ -137,9 +137,13 @@ std::optional<EntryState> referenceEntry(const SemanticProgram &program,
         return std::nullopt;
       cells *= extent;
     }
-    // A fresh allocation is uninitialized, whatever the fill.
+    // A fresh allocation is uninitialized, whatever the fill. A gather root holds the
+    // addresses every replay gives it (gatherFillModulus), whatever the fill.
+    uint64_t modulus = isGatherRoot(program, root.id) ? gatherFillModulus(program) : 0;
     for (uint64_t c = 0; c < cells; ++c)
-      if (root.origin == MemoryRoot::FunctionArgument)
+      if (modulus)
+        data.cells.emplace_back(APInt(root.sort.width, c % modulus));
+      else if (root.origin == MemoryRoot::FunctionArgument)
         data.cells.emplace_back(APInt(root.sort.width, fill, /*isSigned=*/false,
                                       /*implicitTrunc=*/true));
       else
@@ -423,7 +427,7 @@ DomainEnumeration enumerateDomain(const SemanticProgram &program,
   if (!anySupported)
     return close(GateStatus::Unsupported, out.groups[0].unsupported);
   // The trace would be a function of memory, so a parameter point fixes nothing.
-  if (!program.controlOblivious || !program.addressOblivious)
+  if (!traceOblivious(program))
     return close(GateStatus::Unsupported, "the trace depends on memory contents");
   if (controlReadsFloat(program))
     return close(GateStatus::Unsupported, "control or an address reads a float");

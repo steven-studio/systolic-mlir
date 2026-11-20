@@ -260,6 +260,7 @@ NestRecord analyzeNest(const OutlinedNest &nest, const NestAnalysisOptions &opti
   ImportOptions importOptions;
   importOptions.indexBitWidth = options.indexBitWidth;
   importOptions.lowerStructured = true;
+  importOptions.admitGather = options.admitGather;
   SemanticProgram program = importFunction(function, importOptions);
   if (!program.isSupported()) {
     r.modelRefusal = std::string(stringifyUnsupportedKind(program.unsupported->kind)) + ": " +
@@ -566,8 +567,7 @@ NestRecord analyzeNest(const OutlinedNest &nest, const NestAnalysisOptions &opti
       out.proved = provenOverScope(fact);
       out.proposed = !candidate.request->access[view].empty();
       out.affine = out.proposed;
-      for (Term term : candidate.request->access[view]) {
-        NestViewDimension dimension;
+      std::function<void(Term, NestViewDimension &)> describe = [&](Term term, NestViewDimension &dimension) {
         dimension.text = formatTerm(term);
         std::optional<Affine> form = affineOverLevels(term) ? decompose(term) : std::nullopt;
         dimension.affine = form.has_value();
@@ -594,6 +594,31 @@ NestRecord analyzeNest(const OutlinedNest &nest, const NestAnalysisOptions &opti
             dimension.offset = offset;
           else
             dimension.roles.clear();
+        }
+      };
+      for (Term term : candidate.request->access[view]) {
+        NestViewDimension dimension;
+        describe(term, dimension);
+        // Experimental: a gather, [sext|zext] root[index...], each index affine over levels.
+        if (!dimension.affine && program.admitGather) {
+          Term load = term;
+          std::string extend = "none";
+          if (load->op == TermOp::SExt || load->op == TermOp::ZExt) {
+            extend = load->op == TermOp::SExt ? "sext" : "zext";
+            load = load->args[0];
+          }
+          if (load->op == TermOp::Load && gatherLoadsOnly(program, load)) {
+            NestViewDimension::Gather gather;
+            gather.root = functionRoot(load->args[0]->sort.root);
+            gather.elementWidth = load->sort.width;
+            gather.extend = extend;
+            for (unsigned i = 1; i < load->args.size(); ++i) {
+              NestViewDimension index;
+              describe(load->args[i], index);
+              gather.index.push_back(std::move(index));
+            }
+            dimension.gather = std::move(gather);
+          }
         }
         out.affine = out.affine && dimension.affine;
         out.dimensions.push_back(std::move(dimension));
@@ -794,6 +819,22 @@ std::vector<std::string> mappingRefusals(const NestRecord &r, const NestMappingF
     for (unsigned d = 0; d < one.dimensions.size(); ++d) {
       const NestViewDimension &dimension = one.dimensions[d];
       std::string where = std::string("dimension ") + std::to_string(d) + " of the view of " + names[view];
+      if (!dimension.affine && dimension.gather) {
+        // A gather is mapped when its every index is an affine form of roles of this view.
+        for (const NestViewDimension &index : dimension.gather->index) {
+          if (!index.affine || !index.parameters.empty() || !index.offset) {
+            out.push_back(where + " gathers at an index that is not mapped: " + index.text);
+            continue;
+          }
+          for (const auto &[axis, scale] : index.roles)
+            if (!std::strchr(roles[view], axis))
+              out.push_back(where + " gathers at axis " + axisName(axis) + ", which is no role of " +
+                            names[view]);
+        }
+        if (dimension.gather->root < 0)
+          out.push_back(where + " gathers from a root that is not a root of the function");
+        continue;
+      }
       if (!dimension.affine) {
         out.push_back(where + " is not affine: " + dimension.text);
         continue;
@@ -928,7 +969,8 @@ json::Object toJSON(const NestRecord &r, const std::vector<FunctionRoot> &roots)
     for (unsigned view = 0; view < 3; ++view) {
       const NestView &one = r.views[view];
       json::Array dimensions;
-      for (const NestViewDimension &dimension : one.dimensions) {
+      std::function<json::Object(const NestViewDimension &)> dimensionJSON =
+          [&](const NestViewDimension &dimension) {
         json::Array byLevel, byParameter, byRole;
         for (const auto &[level, coefficient] : dimension.levels)
           byLevel.push_back(json::Object{{"level", (int64_t)level}, {"coefficient", coefficient}});
@@ -936,15 +978,28 @@ json::Object toJSON(const NestRecord &r, const std::vector<FunctionRoot> &roots)
           byParameter.push_back(json::Object{{"parameter", (int64_t)parameter}, {"coefficient", coefficient}});
         for (const auto &[axis, scale] : dimension.roles)
           byRole.push_back(json::Object{{"role", axisName(axis)}, {"scale", scale}});
-        dimensions.push_back(json::Object{
+        json::Object object{
             {"form", dimension.text},
             {"affine", dimension.affine},
             {"constant", dimension.affine ? json::Value(dimension.constant) : json::Value(nullptr)},
             {"levels", std::move(byLevel)},
             {"parameters", std::move(byParameter)},
             {"roles", std::move(byRole)},
-            {"offset", dimension.offset ? json::Value(*dimension.offset) : json::Value(nullptr)}});
-      }
+            {"offset", dimension.offset ? json::Value(*dimension.offset) : json::Value(nullptr)}};
+        // Experimental: written only for a gather, so every other record is unchanged.
+        if (dimension.gather) {
+          json::Array index;
+          for (const NestViewDimension &one : dimension.gather->index)
+            index.push_back(dimensionJSON(one));
+          object["gather"] = json::Object{{"root", rootJSON(dimension.gather->root)},
+                                          {"element", "bv" + std::to_string(dimension.gather->elementWidth)},
+                                          {"extend", dimension.gather->extend},
+                                          {"index", std::move(index)}};
+        }
+        return object;
+      };
+      for (const NestViewDimension &dimension : one.dimensions)
+        dimensions.push_back(dimensionJSON(dimension));
       views[names[view]] = json::Object{{"root", rootJSON(one.root)},
                                         {"proposed", one.proposed},
                                         {"affine", one.proposed ? json::Value(one.affine) : json::Value(nullptr)},

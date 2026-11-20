@@ -74,6 +74,16 @@ struct RecordsMode : GeneralizedMatmulOptions {
         return failure();
       }
     }
+    // Experimental: the tables a gathered operand reads its indices from (dp). The nest
+    // reads them while it writes C, the packing before the tiles does not: they must not
+    // overlap C, which is also what the record assumed.
+    for (Value table : g.gatherTables) {
+      if (!provablyDisjointFromOutput(table, C, assumeNoAlias)) {
+        why = "a gathered index table may overlap C; declare the arguments llvm.noalias (C "
+              "restrict) or pass assume-no-alias";
+        return failure();
+      }
+    }
     if (!g.reassoc && !allowFpReassociation) {
       why = "floating-point reassociation is not permitted: the systolic execution sums each "
             "tile from zero and adds the sum to C, a different order of IEEE additions than "
@@ -108,9 +118,16 @@ struct RecordsMode : GeneralizedMatmulOptions {
       std::array<LogicalOperand, 3> operand;
       for (unsigned x = 0; x < 3; ++x) {
         const DrivenOperand &d = g.operands[x];
-        const unsigned rank = cast<MemRefType>(d.memref.getType()).getRank();
         LogicalOperand &o = operand[x];
         o.memref = d.memref;
+        // Experimental: a gathered operand, packed into its rows x columns matrix first.
+        if (!d.pack.empty()) {
+          SmallVector<GatherPackDimension, 2> pack;
+          for (const DrivenOperand::DrivenGather &one : d.pack)
+            pack.push_back({one.gathered, one.table, one.zeroExtend, one.coefficient, one.base});
+          o.memref = materializeGatherPack(builder, loc, d.memref, pack, shapeOf[x], elementType);
+        }
+        const unsigned rank = cast<MemRefType>(o.memref.getType()).getRank();
         o.offsets.assign(rank, 0);
         o.sizes.assign(rank, 1);
         o.strides.assign(rank, 1);

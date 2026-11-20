@@ -1206,6 +1206,49 @@ void Importer::computeObliviousness() {
         if (depends(index))
           program.addressOblivious = false;
   }
+  // Experimental: one level of gather from read-only roots. A root is read-only when no
+  // block writes it; an address is a gather when its only memory dependence is a Load
+  // from such a root's entry memory at an index that itself depends on nothing (no load,
+  // no tainted state, no shadow).
+  if (!program.addressOblivious) {
+    std::vector<bool> written(program.roots.size(), false);
+    for (const Transition &t : program.transitions) {
+      for (const MemoryEffect &effect : t.effects)
+        if (effect.kind == MemoryEffect::Write)
+          written[effect.root] = true;
+      for (const auto &[root, memoryTerm] : t.memoryUpdates)
+        if (memoryTerm->op != TermOp::MemVar)
+          written[root] = true;
+    }
+    std::set<unsigned> gathers;
+    bool ok = true;
+    std::function<bool(Term)> gatherOnly = [&](Term t) -> bool {
+      if (t->op == TermOp::Load) {
+        Term mem = t->args[0];
+        if (mem->op != TermOp::MemVar || written[mem->sort.root])
+          return false;
+        for (unsigned i = 1; i < t->args.size(); ++i)
+          if (depends(t->args[i]))
+            return false;
+        gathers.insert(mem->sort.root);
+        return true;
+      }
+      if (t->op == TermOp::Shadow || t->op == TermOp::Store)
+        return !depends(t);
+      if (t->op == TermOp::State)
+        return !tainted[t->index];
+      return llvm::all_of(t->args, gatherOnly);
+    };
+    for (const Transition &t : program.transitions)
+      for (const MemoryEffect &effect : t.effects)
+        for (Term index : effect.index)
+          if (depends(index) && !gatherOnly(index))
+            ok = false;
+    // dp[dp[i]] is refused above: the inner load's index depends on memory.
+    program.addressGather = ok && !gathers.empty();
+    if (program.addressGather)
+      program.gatherRoots.assign(gathers.begin(), gathers.end());
+  }
   for (MacSite &site : program.sites) {
     site.oblivious = program.controlOblivious && program.addressOblivious;
     std::set<unsigned> coordinates;
@@ -1244,6 +1287,7 @@ SemanticProgram importFunction(func::FuncOp function,
   program.functionName = function.getSymName().str();
   program.indexBitWidth = options.indexBitWidth;
   program.structuredLoweringApplied = options.lowerStructured;
+  program.admitGather = options.admitGather;
   program.fingerprint = fingerprintOf(function, options);
 
   auto fail = [&](UnsupportedKind kind, std::string detail) {
@@ -1299,6 +1343,33 @@ SemanticProgram importFunction(func::FuncOp function,
   } catch (const TermError &error) {
     return fail(UnsupportedKind::ResourceLimit, error.what());
   }
+}
+
+bool gatherLoadsOnly(const SemanticProgram &program, Term term) {
+  if (term->op == TermOp::Load) {
+    Term mem = term->args[0];
+    if (mem->op != TermOp::MemVar || !isGatherRoot(program, mem->sort.root))
+      return false;
+    for (unsigned i = 1; i < term->args.size(); ++i)
+      if (containsOp(term->args[i], TermOp::Load))
+        return false;
+    return true;
+  }
+  return llvm::all_of(term->args, [&](Term arg) { return gatherLoadsOnly(program, arg); });
+}
+
+uint64_t gatherFillModulus(const SemanticProgram &program) {
+  uint64_t modulus = 0;
+  for (const Transition &t : program.transitions)
+    for (const MemoryEffect &effect : t.effects)
+      for (unsigned d = 0; d < effect.index.size(); ++d) {
+        if (!containsOp(effect.index[d], TermOp::Load))
+          continue;
+        int64_t extent = program.roots[effect.root].extents[d];
+        if (extent > 0 && (modulus == 0 || (uint64_t)extent < modulus))
+          modulus = extent;
+      }
+  return modulus ? modulus : 1;
 }
 
 bool matchesSource(const SemanticProgram &program, func::FuncOp function,

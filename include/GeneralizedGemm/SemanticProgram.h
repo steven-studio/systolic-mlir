@@ -194,6 +194,16 @@ struct SemanticProgram {
   // Slice results (invariant I4), computed, never assumed.
   bool controlOblivious = false;
   bool addressOblivious = false;
+  // Experimental (exp/semgus-indirect-dp). Computed: every address that depends on memory
+  // does so only through one level of gather, a Load from a root the program never writes,
+  // at an index that reads no memory and no state that does: A[dp[i], k]. Such a load is a
+  // function of its index for the whole run, as long as that root is separate from every
+  // root written (a separation the claims then name). `gatherRoots` lists those roots.
+  bool addressGather = false;
+  llvm::SmallVector<unsigned, 2> gatherRoots;
+  // Copied from ImportOptions::admitGather: the checkers take an addressGather program as
+  // oblivious. Off by default, and then nothing changes.
+  bool admitGather = false;
 
   // Named premises of this model. Never Proven (invariant I9).
   std::vector<ProofStatus> assumptions;
@@ -206,6 +216,29 @@ struct SemanticProgram {
 
   bool isSupported() const { return !unsupported.has_value(); }
 };
+
+/// Whether the trace is a function of the parameters alone: control oblivious, and every
+/// address either oblivious or, when admitted, a one-level gather from read-only roots.
+inline bool traceOblivious(const SemanticProgram &program) {
+  return program.controlOblivious &&
+         (program.addressOblivious || (program.admitGather && program.addressGather));
+}
+
+/// Whether `root` is a gather root of an admitted gather program.
+inline bool isGatherRoot(const SemanticProgram &program, unsigned root) {
+  return program.admitGather && program.addressGather &&
+         llvm::is_contained(program.gatherRoots, root);
+}
+
+/// The contents a replay gives a gather root's cell c when it fixes them: c mod `gatherFillModulus`,
+/// the smallest static extent of a dimension a gathered index addresses (1 when none is
+/// static), so every gathered address is in bounds. A sample of the gather's contents,
+/// never a claim about them.
+uint64_t gatherFillModulus(const SemanticProgram &program);
+
+/// Whether every Load in `term` is a gather of an admitted gather program: from a gather
+/// root's entry memory, at an index with no Load. True of a term with no Load.
+bool gatherLoadsOnly(const SemanticProgram &program, Term term);
 
 /// The domain evidence a freshly imported model supports: none.
 DomainEvidence importedDomainEvidence();

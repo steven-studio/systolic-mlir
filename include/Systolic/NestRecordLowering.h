@@ -105,6 +105,18 @@ struct DrivenOperand {
   /// Tables: the element offset (row-major over the memref's static shape) of each element of
   /// the operand's rows x columns matrix, row by row.
   llvm::SmallVector<int64_t> table;
+  /// Experimental (exp/semgus-indirect-dp), formulas with a gather: A[dp[i], k]. When
+  /// nonempty, one entry per dimension of `memref`, and the operand is packed before the
+  /// tiles: matrix[r][c] = memref[index_0(r, c), ...] (DrivenGather); `dimensions` is then
+  /// the identity view of that matrix.
+  struct DrivenGather {
+    bool gathered = false;   // the index is table[base + coefficient . (r, c)]
+    Value table;             // gathered: the one-dimensional integer memref
+    bool zeroExtend = false; // gathered: index_castui, not index_cast
+    std::array<int64_t, 2> coefficient{0, 0};
+    int64_t base = 0;
+  };
+  llvm::SmallVector<DrivenGather, 2> pack;
 };
 
 struct RecordDrivenGemm {
@@ -113,6 +125,9 @@ struct RecordDrivenGemm {
   bool tables = false;
   std::array<DrivenOperand, 3> operands; // A, B, C
   bool reassoc = false;                  // the accumulation's arith.addf carries reassoc
+  /// Experimental: the memrefs gathered from (dp), which the lowering's alias gate checks
+  /// against C as it checks A and B: the record assumes them apart from C.
+  llvm::SmallVector<Value, 1> gatherTables;
   int64_t iterations = 0;                // tables: the iterations evaluated
   std::string where;                     // "nest N of F"
   std::string summary;                   // what was read and checked, for the remark
