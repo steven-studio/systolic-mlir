@@ -5,7 +5,28 @@
  *   systolic-cfront --clang CLANG [--clang-major N] [-DNAME[=VAL]] [-IDIR]
  *                   [-std=STD] [--function NAME] [--skip-unsupported]
  *                   [--symbol-suffix S] [--interface FILE.json]
- *                   [--fp-reassociation] FILE.c [-o OUT.mlir]
+ *                   [--fp-reassociation] [--static-extents]
+ *                   [--modulo-subscripts] FILE.c [-o OUT.mlir]
+ *
+ * --static-extents (systolic-cc's Generalized GEMM fallback,
+ * docs/GENERALIZED_GEMM_SCOPE.md "The fallback in systolic-cc"): an array
+ * parameter written with a leading bound -- float A[64][16], A[M][K],
+ * A[restrict 64][16], A[static 64] -- becomes memref<EXTENTxKxf32> instead of
+ * memref<?xKxf32>, where EXTENT is the leading extent the interface already
+ * gives (the last row the accesses reach, plus one), when every access's
+ * range is static and starts at row 0 or later. That is the extent
+ * systolic-cc builds the memref descriptor with, so the static type states
+ * nothing the call does not already: C does not enforce a parameter's
+ * declared bound, so the bound written is not used. A parameter written as
+ * a pointer (float (*A)[16], A[][16]), one whose accesses are offset by a
+ * parameter, or one that reads before its first row keeps memref<?x...>.
+ *
+ * --modulo-subscripts: a subscript may also be E % C, E an affine subscript of
+ * the loop counters (no parameter), C a positive integer constant, and E >= 0
+ * wherever C evaluates it (checked; C's % is the floor modulo there). It
+ * becomes the affine expression (E) mod C; its range is computed by running
+ * the nest's counters (up to the enumeration limit below). The GEMM lowering
+ * finds no GEMM in such a nest; systolic-cc's Generalized GEMM fallback may.
  *
  * --fp-reassociation marks every floating-point arith.addf / subf / mulf
  * `fastmath<reassoc>`: the program permits reassociating floating-point sums,
@@ -512,7 +533,11 @@ typedef struct {
   /* ENV_MEMREF */
   int rank;
   const char *elem;
-  char *type;                  /* memref<?x...> */
+  char *type;                  /* memref<?x...>; with --static-extents a
+                                  placeholder until the function is done */
+  char *dynamic_type;          /* --static-extents: memref<?x...> */
+  int declared_bound;          /* --static-extents: written with a leading
+                                  bound, float A[64][16] / A[M][K] */
   int inner_dims[MAX_RANK];
   /* ENV_SCALAR */
   /* (elem above) */
@@ -574,6 +599,8 @@ typedef struct {
   long counter;
   const char *symbol_suffix;
   int fp_reassociation;        /* --fp-reassociation: fastmath<reassoc> */
+  int static_extents;          /* --static-extents */
+  int modulo_subscripts;       /* --modulo-subscripts */
 
   env_entry *env;
   size_t env_n, env_cap;
@@ -1595,6 +1622,74 @@ static access_info *access_of(translator *tr, const char *decl, int rank) {
   return a;
 }
 
+/* --modulo-subscripts: when the subscript `ix` is E % C (parentheses and
+   integer conversions around it), C a positive integer constant, the node E
+   and C in *modulus; else NULL. Every conversion between `ix` and the % must
+   hold the values 0 .. C - 1 (the remainder of a nonnegative E). */
+static const json_value *modulo_operand(const json_value *ix,
+                                        long long *modulus) {
+  const json_value *n = strip_parens_and_casts(ix, kIndexCasts);
+  if (strcmp(kind_of(n), "BinaryOperator") != 0 ||
+      strcmp(opcode_of(n), "%") != 0)
+    return NULL;
+  long long c;
+  if (!try_int_constant(child(n, 1), &c))
+    unsupported(n, "the right operand of %% in a subscript is not an integer "
+                   "constant");
+  if (c <= 0)
+    unsupported(n, "the right operand of %% in a subscript is %lld; only a "
+                   "positive constant is supported", c);
+  for (const json_value *cur = ix; cur != n; cur = child(cur, 0)) {
+    __int128 min, max;
+    if (strcmp(kind_of(cur), "ParenExpr") == 0)
+      continue;
+    if (!node_type_range(cur, &min, &max) || min > 0 || max < c - 1)
+      unsupported(cur, "a conversion of the remainder in this subscript "
+                       "cannot hold every value 0 .. %lld", c - 1);
+  }
+  *modulus = c;
+  return child(n, 0);
+}
+
+typedef struct {
+  const linear_form *form;
+  long long modulus;
+  long long lo, hi;
+  int found;
+  const json_value *node;
+} mod_range_ctx;
+
+static void mod_range_point(translator *tr, void *p) {
+  mod_range_ctx *c = p;
+  long long v;
+  if (!form_value(tr, c->form, &v))
+    unsupported(c->node, "integer constant expression overflows");
+  if (v < 0)
+    unsupported(c->node, "the left operand of %% in this subscript is %lld at "
+                         "a point of the nest; C's %% of a negative value is "
+                         "not the floor modulo of an affine map", v);
+  v %= c->modulus;
+  if (!c->found || v < c->lo)
+    c->lo = v;
+  if (!c->found || v > c->hi)
+    c->hi = v;
+  c->found = 1;
+}
+
+/* The exact range of (form mod modulus) over the points of the nest, by
+   running it; refuses a point where the form is negative. 0 when the nest
+   has no point. */
+static int mod_range_enumerated(translator *tr, const linear_form *form,
+                                long long modulus, long long *lo,
+                                long long *hi, const json_value *node) {
+  mod_range_ctx c = {form, modulus, 0, 0, 0, node};
+  size_t visited = 0;
+  enumerate_points(tr, 0, mod_range_point, &c, &visited, node);
+  *lo = c.lo;
+  *hi = c.hi;
+  return c.found;
+}
+
 /* The memref entry of a fully subscripted array element, and its subscripts
    joined by ", ". Records the access (read / written, the exact range of each
    subscript) for the function's interface. */
@@ -1625,9 +1720,27 @@ static env_entry *array_access(translator *tr, const json_value *node,
 
   char *texts[MAX_RANK];
   linear_form forms[MAX_RANK];
+  /* --modulo-subscripts: a subscript E % C is E's form, its node E, and C */
+  long long mods[MAX_RANK] = {0};
+  const json_value *operands[MAX_RANK];
   tr->in_subscript = 1;   /* a signed integer parameter is a symbol here */
-  for (size_t d = 0; d < count; ++d)   /* outermost subscript first */
-    texts[d] = affine_index(tr, indices[count - 1 - d], &forms[d]);
+  for (size_t d = 0; d < count; ++d) {   /* outermost subscript first */
+    const json_value *ix = indices[count - 1 - d];
+    const json_value *e_node =
+        tr->modulo_subscripts ? modulo_operand(ix, &mods[d]) : NULL;
+    operands[d] = e_node ? e_node : ix;
+    char *t = affine_index(tr, operands[d], &forms[d]);
+    if (e_node) {
+      if (form_has_symbol(tr, &forms[d]))
+        unsupported(ix, "the left operand of %% in a subscript reads a "
+                        "parameter; only loop counters and constants are "
+                        "supported there");
+      texts[d] = format("((%s) mod %lld)", t, mods[d]);
+      free(t);
+    } else {
+      texts[d] = t;
+    }
+  }
 
   /* Every operation and conversion of the subscripts in its C type
      (header_expr): C computes a subscript in its own type, so one that
@@ -1638,10 +1751,10 @@ static env_entry *array_access(translator *tr, const json_value *node,
     long long a_unused;
     linear_form f_unused;
     int r_unused;
-    if (!header_expr(tr, indices[count - 1 - d], NULL, &sub, &a_unused,
+    if (!header_expr(tr, operands[d], NULL, &sub, &a_unused,
                      &f_unused, &r_unused))
-      unsupported(indices[count - 1 - d], "subscript is not an affine "
-                                          "expression of the loop counters");
+      unsupported(operands[d], "subscript is not an affine "
+                               "expression of the loop counters");
   }
   tr->in_subscript = 0;
   /* A node that reads a parameter has no exact value here (header_node.
@@ -1673,6 +1786,12 @@ static env_entry *array_access(translator *tr, const json_value *node,
     for (size_t j = 0; j < nforms; ++j)
       found[j] = form_range(tr, &all_forms[j], &all_lo[j], &all_hi[j], node);
   }
+  /* A subscript E % C: E >= 0 at every point, and the exact range of the
+     remainder, both by running the nest. */
+  for (size_t d = 0; d < count; ++d)
+    if (mods[d])
+      found[d] = mod_range_enumerated(tr, &forms[d], mods[d], &all_lo[d],
+                                      &all_hi[d], indices[count - 1 - d]);
   /* In an access that never runs C evaluates no node that reads a counter,
      and it touches no element: it gives the interface no range (systolic-cc
      sizes the memref descriptor and its copies of the caller's array by the
@@ -2937,6 +3056,49 @@ static void statements(translator *tr, const json_value *stmts, int indent,
 
 /* --------------------------------------------------------------- functions */
 
+/* --static-extents: whether the parameter's declarator, as written in the
+   source, has a leading bound: NAME [ qualifiers BOUND ]. A declaration from
+   a macro or another file is taken as having none. */
+static int has_declared_bound(translator *tr, const json_value *p,
+                              const char *pname) {
+  const json_value *loc = json_get(p, "loc");
+  if (!loc || json_get(loc, "spellingLoc") || json_get(loc, "expansionLoc") ||
+      json_get(loc, "includedFrom"))
+    return 0;
+  long long off = json_int(json_get(loc, "offset"), -1);
+  long long len = json_int(json_get(loc, "tokLen"), 0);
+  if (off < 0 || len <= 0 || (size_t)(off + len) > tr->sm->length ||
+      (size_t)len != strlen(pname) ||
+      strncmp(tr->sm->text + off, pname, (size_t)len) != 0)
+    return 0;
+  const char *s = tr->sm->text + off + len;
+  const char *end = tr->sm->text + tr->sm->length;
+  while (s < end && isspace((unsigned char)*s))
+    ++s;
+  if (s == end || *s != '[')
+    return 0;
+  ++s;
+  static const char *const quals[] = {"restrict", "__restrict", "__restrict__",
+                                      "const", "volatile", "static"};
+  for (;;) {
+    while (s < end && isspace((unsigned char)*s))
+      ++s;
+    int skipped = 0;
+    for (size_t q = 0; q < sizeof quals / sizeof *quals; ++q) {
+      size_t n = strlen(quals[q]);
+      if ((size_t)(end - s) > n && strncmp(s, quals[q], n) == 0 &&
+          !isalnum((unsigned char)s[n]) && s[n] != '_') {
+        s += n;
+        skipped = 1;
+        break;
+      }
+    }
+    if (!skipped)
+      break;
+  }
+  return s < end && *s != ']' && *s != '*';
+}
+
 static char *parameter(translator *tr, const json_value *p) {
   char *t = strip_qualifiers(qual_type(p));
   const char *pname = json_string(json_get(p, "name"), "");
@@ -3043,7 +3205,13 @@ static char *parameter(translator *tr, const json_value *p) {
   e->type = xstrdup(type);
   for (int d = 0; d < rank - 1; ++d)
     e->inner_dims[d] = dims[d];
-  return format("%s: %s%s %s", name, type, noalias ? " {llvm.noalias}" : "",
+  if (tr->static_extents) {
+    /* The type is known once the accesses are (static_extent_types). */
+    e->dynamic_type = e->type;
+    e->type = format("@@systolic-cfront-param-%zu@@", tr->env_n - 1);
+    e->declared_bound = has_declared_bound(tr, p, pname);
+  }
+  return format("%s: %s%s %s", name, e->type, noalias ? " {llvm.noalias}" : "",
                 loc_text(tr, p));
 }
 
@@ -3161,6 +3329,63 @@ static void interface(translator *tr, const json_value *fn,
   tr->interfaces = joined;
 }
 
+/* Every occurrence of `from` in `s` replaced by `to`, in a new string. */
+static char *replace_all(const char *s, const char *from, const char *to) {
+  size_t nf = strlen(from), nt = strlen(to), count = 0;
+  for (const char *q = strstr(s, from); q; q = strstr(q + nf, from))
+    ++count;
+  char *out = xmalloc(strlen(s) + count * nt + 1);
+  char *w = out;
+  for (const char *q; (q = strstr(s, from)); s = q + nf) {
+    memcpy(w, s, (size_t)(q - s));
+    w += q - s;
+    memcpy(w, to, nt);
+    w += nt;
+  }
+  strcpy(w, s);
+  return out;
+}
+
+/* --static-extents, once the function is translated: each array parameter's
+   type in the lines from `first_line` on -- memref<EXTENTx...> for one with
+   a declared leading bound whose accesses' ranges are static and start at
+   row 0 or later (EXTENT = the interface's leading extent), else the
+   memref<?x...> it has without the option. */
+static void static_extent_types(translator *tr, size_t first_line) {
+  for (size_t i = 0; i < tr->env_n; ++i) {
+    env_entry *e = &tr->env[i];
+    if (e->kind != ENV_MEMREF || !e->dynamic_type)
+      continue;
+    access_info *info = NULL;
+    for (size_t a = 0; a < tr->acc_n; ++a)
+      if (strcmp(tr->accesses[a].decl, e->decl) == 0)
+        info = &tr->accesses[a];
+    char *type;
+    if (e->declared_bound && info && info->has_ranges && !info->hi_expr &&
+        info->lo[0] >= 0 && info->hi[0] < LLONG_MAX) {
+      char buf[256];
+      int o = snprintf(buf, sizeof buf, "memref<%lld", info->hi[0] + 1);
+      for (int d = 0; d < e->rank - 1; ++d)
+        o += snprintf(buf + o, sizeof buf - (size_t)o, "x%d", e->inner_dims[d]);
+      snprintf(buf + o, sizeof buf - (size_t)o, "x%s>", e->elem);
+      type = xstrdup(buf);
+    } else {
+      type = xstrdup(e->dynamic_type);
+    }
+    for (size_t l = first_line; l < tr->lines.n; ++l) {
+      if (!strstr(tr->lines.items[l], e->type))
+        continue;
+      char *line = replace_all(tr->lines.items[l], e->type, type);
+      free((void *)(uintptr_t)tr->lines.items[l]);
+      tr->lines.items[l] = line;
+    }
+    free(e->type);
+    e->type = type;
+    free(e->dynamic_type);
+    e->dynamic_type = NULL;
+  }
+}
+
 static void function(translator *tr, const json_value *fn) {
   char *ret = xstrdup(qual_type(fn));
   char *paren = strchr(ret, '(');
@@ -3209,6 +3434,7 @@ static void function(translator *tr, const json_value *fn) {
     free(args);
     args = joined;
   }
+  const size_t first_line = tr->lines.n;
   emit(tr, 1, "func.func @%s%s(%s) {", json_string(json_get(fn, "name"), ""),
        tr->symbol_suffix, args);
   /* Every integer parameter as an index at the top of the function: a
@@ -3223,6 +3449,8 @@ static void function(translator *tr, const json_value *fn) {
   emit(tr, 2, "func.return %s", loc_text(tr, body));
   emit(tr, 1, "} %s", loc_text(tr, fn));
   interface(tr, fn, params, nparams, body);
+  if (tr->static_extents)
+    static_extent_types(tr, first_line);
 }
 
 /* ------------------------------------------------------------ GEMM sites */
@@ -3875,8 +4103,8 @@ static void usage(void) {
           "usage: systolic-cfront --clang CLANG [--clang-major N] "
           "[-DNAME[=VAL]] [-IDIR] [-std=STD] [--function NAME] "
           "[--skip-unsupported] [--symbol-suffix S] [--interface FILE] "
-          "[--gemm-sites FILE] [--fp-reassociation] "
-          "FILE.c [-o OUT.mlir]\n");
+          "[--gemm-sites FILE] [--fp-reassociation] [--static-extents] "
+          "[--modulo-subscripts] FILE.c [-o OUT.mlir]\n");
 }
 
 /* --opt=value or --opt value. */
@@ -3903,6 +4131,7 @@ int main(int argc, char **argv) {
   const char *sites_path = NULL;
   long clang_major = 24;
   int skip_unsupported = 0, fp_reassociation = 0;
+  int static_extents = 0, modulo_subscripts = 0;
   strvec defines = {0}, includes = {0}, only = {0};
 
   for (int i = 1; i < argc; ++i) {
@@ -3926,6 +4155,10 @@ int main(int argc, char **argv) {
       skip_unsupported = 1;
     } else if (strcmp(a, "--fp-reassociation") == 0) {
       fp_reassociation = 1;
+    } else if (strcmp(a, "--static-extents") == 0) {
+      static_extents = 1;
+    } else if (strcmp(a, "--modulo-subscripts") == 0) {
+      modulo_subscripts = 1;
     } else if ((v = option_value(a, "--output", &i, argc, argv))) {
       output = v;
     } else if (strcmp(a, "-o") == 0) {
@@ -4054,6 +4287,8 @@ int main(int argc, char **argv) {
      when it changes from the previous node's, so track it in order. */
   char current_file[PATH_MAX] = "";
   /* The GEMM sites of every function defined here, translated or not. */
+  /* open_memstream's buffer: not on the record of allocations, so closed and
+     freed here on every way out of main below. */
   char *sites_buf = NULL;
   size_t sites_len = 0;
   FILE *sites_out = sites_path ? open_memstream(&sites_buf, &sites_len) : NULL;
@@ -4088,6 +4323,7 @@ int main(int argc, char **argv) {
       continue;
     if (nfunctions == sizeof functions / sizeof functions[0]) {
       fprintf(stderr, "systolic-cfront: too many functions\n");
+      if (sites_out) { fclose(sites_out); free(sites_buf); }
       return 2;
     }
     functions[nfunctions++] = decl;
@@ -4116,6 +4352,7 @@ int main(int argc, char **argv) {
     for (size_t a = 0; a < missing.n; ++a)
       fprintf(stderr, "%s%s", a ? ", " : "", missing.items[a]);
     fprintf(stderr, " in %s\n", source);
+    if (sites_out) { fclose(sites_out); free(sites_buf); }
     return 2;
   }
 
@@ -4128,6 +4365,8 @@ int main(int argc, char **argv) {
   tr.sm = &sm;
   tr.symbol_suffix = symbol_suffix;
   tr.fp_reassociation = fp_reassociation;
+  tr.static_extents = static_extents;
+  tr.modulo_subscripts = modulo_subscripts;
   emit(&tr, 0, "// Generated by systolic-cfront from %s.", display);
   char *defs = xstrdup("");
   for (size_t i = 0; i < defines.n; ++i) {
@@ -4152,6 +4391,7 @@ int main(int argc, char **argv) {
     if (!skip_unsupported) {
       fprintf(stderr, "%s:%ld:%ld: error: %s\n", source, line, col,
               unsupported_message);
+      if (sites_out) { fclose(sites_out); free(sites_buf); }
       return 1;
     }
     /* The function stays C; nothing of it is emitted. */
@@ -4170,10 +4410,12 @@ int main(int argc, char **argv) {
     FILE *out = fopen(sites_path, "w");
     if (!out) {
       fprintf(stderr, "systolic-cfront: cannot write %s\n", sites_path);
+      free(sites_buf);   /* open_memstream's: not on the record (above) */
       return 2;
     }
     fprintf(out, "{\"sites\": [\n%s\n]}\n", sites_buf ? sites_buf : "");
     fclose(out);
+    free(sites_buf);
   }
 
   if (interface_path) {
