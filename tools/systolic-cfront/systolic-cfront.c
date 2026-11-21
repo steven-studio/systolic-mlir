@@ -46,6 +46,22 @@
  * (T[T[i]] is refused), never in an array that is written (C's stores stay
  * affine), and a table read as anything but such a subscript is refused.
  *
+ * --scatter-subscripts (with --static-extents; systolic-cc's Generalized GEMM
+ * fallback): a subscript of an array that is written may be any integer
+ * expression of the loop counters, signed integer parameters and integer
+ * literals with + - * / % & | ^ << >>, unary - and ~, E1 CMP E2 ? E3 : E4,
+ * and reads of one-dimensional integer array parameters at such
+ * expressions, to any depth: C[dp1[dp2[i]]][j], C[(i * i) % 16][j],
+ * C[f(i, j)][g(i, j)]. It is computed in index arithmetic (arith.divsi,
+ * remsi, ...: C's int results wherever C defines them) and the array is read
+ * and written with memref.load / memref.store. The array's leading extent is
+ * then the bound written as an integer literal, as is every table's; without
+ * one the function is outside the subset. The interface gives the
+ * expressions as C text and the counters they read with their ranges
+ * (scatter): systolic-cc's shim evaluates them at every call and runs the
+ * function as written unless every one is inside the array. An affine or
+ * E % C subscript stays what it was.
+ *
  * --fp-reassociation marks every floating-point arith.addf / subf / mulf
  * `fastmath<reassoc>`: the program permits reassociating floating-point sums,
  * as clang's -fassociative-math does. Without it nothing is marked, and the
@@ -618,6 +634,9 @@ typedef struct {
   int gathered;
   const char *gather_table, *gather_table_decl;
   long long gather_extent;
+  /* --scatter-subscripts: written at a general subscript; the interface's
+     "scatter" object (the counters and the expressions as C text). */
+  char *scatter_json;
 } access_info;
 
 typedef struct {
@@ -631,6 +650,14 @@ typedef struct {
   int static_extents;          /* --static-extents */
   int modulo_subscripts;       /* --modulo-subscripts */
   int gather_subscripts;       /* --gather-subscripts */
+  int scatter_subscripts;      /* --scatter-subscripts */
+  /* Set by array_access for a written access at general subscripts, for the
+     assignment to emit; cleared there. */
+  struct {
+    int active;
+    int count;
+    const json_value *nodes[MAX_RANK];
+  } general;
   int in_gather;               /* translating the T[E] of a gather */
   /* Set by array_access for the access it just read when its leading
      subscript is a gather, for load() to emit; cleared by load(). */
@@ -1730,6 +1757,121 @@ static int mod_range_enumerated(translator *tr, const linear_form *form,
   return c.found;
 }
 
+/* --scatter-subscripts: whether the subscript is affine, or E % C under
+   --modulo-subscripts, without abandoning the function when it is not. */
+static int subscript_is_affine(translator *tr, const json_value *ix) {
+  jmp_buf saved;
+  memcpy(saved, unsupported_jump, sizeof saved);
+  int ok = 0;
+  if (setjmp(unsupported_jump) == 0) {
+    long long mod = 0;
+    const json_value *e_node = tr->modulo_subscripts ? modulo_operand(ix, &mod) : NULL;
+    linear_form form;
+    affine_index(tr, e_node ? e_node : ix, &form);
+    ok = 1;
+  }
+  memcpy(unsupported_jump, saved, sizeof saved);
+  return ok;
+}
+
+/* --scatter-subscripts: an index table, read at a general subscript. */
+static env_entry *general_table(translator *tr, const json_value *node) {
+  const json_value *base = strip_parens_and_casts(
+      strip_parens_and_casts(child(node, 0), kDecayNoOp), kLoadNoOp);
+  env_entry *t = strcmp(kind_of(base), "DeclRefExpr") == 0
+                     ? env_find(tr, referenced_id(base)) : NULL;
+  if (!t || t->kind != ENV_MEMREF || !t->index_table || t->rank != 1)
+    unsupported(node, "a general subscript reads an array that is no "
+                      "one-dimensional integer array parameter");
+  if (!tr->static_extents || t->declared_extent <= 0)
+    unsupported(node, "the integer array '%s' is read at a general subscript, "
+                      "and its bound is not written as an integer literal",
+                referenced_name(base));
+  return t;
+}
+
+static const char *general_binary(const char *op) {
+  static const char *const ops[][2] = {
+      {"+", "addi"}, {"-", "subi"}, {"*", "muli"}, {"/", "divsi"},
+      {"%", "remsi"}, {"&", "andi"}, {"|", "ori"}, {"^", "xori"},
+      {"<<", "shli"}, {">>", "shrsi"}};
+  for (size_t i = 0; i < sizeof ops / sizeof *ops; ++i)
+    if (strcmp(op, ops[i][0]) == 0)
+      return ops[i][1];
+  return NULL;
+}
+
+static const char *general_compare(const char *op) {
+  static const char *const ops[][2] = {{"<", "slt"}, {"<=", "sle"}, {">", "sgt"},
+                                       {">=", "sge"}, {"==", "eq"}, {"!=", "ne"}};
+  for (size_t i = 0; i < sizeof ops / sizeof *ops; ++i)
+    if (strcmp(op, ops[i][0]) == 0)
+      return ops[i][1];
+  return NULL;
+}
+
+/* --scatter-subscripts: a general subscript as C text for the shim (every
+   value as long long, a counter as __systolic_cc_iv_NAME), checking that it
+   is inside the subset; the counters it reads are added to `ivs`. */
+static char *general_text(translator *tr, const json_value *node, strvec *ivs) {
+  node = strip_parens_and_casts(node, kIndexCasts);
+  const char *kind = kind_of(node), *op = opcode_of(node);
+  char *type = strip_qualifiers(qual_type(node));
+  if (strstr(type, "unsigned") && strcmp(kind, "ArraySubscriptExpr") != 0)
+    unsupported(node, "a general subscript computes in an unsigned type, "
+                      "which wraps");
+  if (strcmp(kind, "IntegerLiteral") == 0)
+    return format("%lldLL", int_constant(node));
+  if (strcmp(kind, "DeclRefExpr") == 0) {
+    env_entry *e = env_find(tr, referenced_id(node));
+    if (e && e->kind == ENV_IV) {
+      if (e->shift.n || e->nonbox)
+        unsupported(node, "a general subscript reads a counter whose bounds "
+                          "read another");
+      /* "decl id|C name": the shim's loop runs the counter by its C name */
+      char *entry = format("%s|%s", e->decl, referenced_name(node));
+      int seen = 0;
+      for (size_t i = 0; i < ivs->n; ++i)
+        seen |= strcmp(ivs->items[i], entry) == 0;
+      if (!seen)
+        strvec_push(ivs, entry);
+      return format("__systolic_cc_iv_%s", referenced_name(node));
+    }
+    if (e && e->kind == ENV_INTSCALAR && e->is_signed)
+      return format("((long long)%s)", referenced_name(node));
+    unsupported(node, "a general subscript reads '%s', which is no loop "
+                      "counter or signed integer parameter",
+                referenced_name(node));
+  }
+  if (strcmp(kind, "ArraySubscriptExpr") == 0) {
+    env_entry *t = general_table(tr, node);
+    char *ix = general_text(tr, child(node, 1), ivs);
+    return format("((long long)%s[%s])", t->cname, ix);
+  }
+  if (strcmp(kind, "UnaryOperator") == 0 &&
+      (strcmp(op, "-") == 0 || strcmp(op, "~") == 0 || strcmp(op, "+") == 0))
+    return format("(%s%s)", op, general_text(tr, child(node, 0), ivs));
+  if (strcmp(kind, "BinaryOperator") == 0 && general_binary(op)) {
+    char *a = general_text(tr, child(node, 0), ivs);
+    char *b = general_text(tr, child(node, 1), ivs);
+    return format("(%s %s %s)", a, op, b);
+  }
+  if (strcmp(kind, "ConditionalOperator") == 0) {
+    const json_value *cond = strip_parens_and_casts(child(node, 0), kIndexCasts);
+    if (strcmp(kind_of(cond), "BinaryOperator") != 0 ||
+        !general_compare(opcode_of(cond)))
+      unsupported(cond, "the condition of ?: in a general subscript is no "
+                        "comparison of integers");
+    char *a = general_text(tr, child(cond, 0), ivs);
+    char *b = general_text(tr, child(cond, 1), ivs);
+    char *t = general_text(tr, child(node, 1), ivs);
+    char *f = general_text(tr, child(node, 2), ivs);
+    return format("((%s %s %s) ? %s : %s)", a, opcode_of(cond), b, t, f);
+  }
+  unsupported(node, "a general subscript uses %s, which is outside the subset",
+              op[0] ? op : kind);
+}
+
 /* The memref entry of a fully subscripted array element, and its subscripts
    joined by ", ". Records the access (read / written, the exact range of each
    subscript) for the function's interface. */
@@ -1761,6 +1903,77 @@ static env_entry *array_access(translator *tr, const json_value *node,
     unsupported(node, "the integer array '%s' is read only as the leading "
                       "subscript of another array's read (A[%s[i]][k])",
                 referenced_name(base), referenced_name(base));
+  /* --scatter-subscripts: a written array at a general subscript. */
+  if (written && tr->scatter_subscripts && !tr->in_gather) {
+    int general = 0;
+    tr->in_subscript = 1;
+    for (size_t d = 0; d < count && !general; ++d)
+      general = !subscript_is_affine(tr, indices[count - 1 - d]);
+    /* Only an expression general_text takes is a general subscript; for any
+       other the affine path below says what it always said. */
+    strvec ivs = {0};
+    char *texts[MAX_RANK];
+    if (general) {
+      jmp_buf saved;
+      memcpy(saved, unsupported_jump, sizeof saved);
+      if (setjmp(unsupported_jump) == 0) {
+        for (size_t d = 0; d < count; ++d)
+          texts[d] = general_text(tr, indices[count - 1 - d], &ivs);
+      } else {
+        general = 0;
+      }
+      memcpy(unsupported_jump, saved, sizeof saved);
+    }
+    if (general) {
+      if (!tr->static_extents || e->declared_extent <= 0)
+        unsupported(node, "'%s' is written at a general subscript, and its "
+                          "leading bound is not written as an integer literal "
+                          "(float %s[16][...])",
+                    referenced_name(base), referenced_name(base));
+      if (env_has_nonbox(tr))
+        unsupported(node, "a general subscript in a nest whose bounds read "
+                          "the enclosing counters");
+      tr->in_subscript = 0;
+      access_info *info = access_of(tr, e->decl, e->rank);
+      if (info->scatter_json)
+        unsupported(node, "'%s' is written at general subscripts twice",
+                    referenced_name(base));
+      info->read |= read;
+      info->written = 1;
+      info->gathered = 1;
+      info->gather_extent = e->declared_extent;
+      char *loops = xstrdup("");
+      for (size_t i = 0; i < ivs.n; ++i) {
+        const char *bar = strchr(ivs.items[i], '|');
+        char *decl = format("%.*s", (int)(bar - ivs.items[i]), ivs.items[i]);
+        env_entry *iv = env_find(tr, decl);
+        char *one = format("%s{\"name\": \"__systolic_cc_iv_%s\", \"runs\": %s, "
+                           "\"first\": %lld, \"last\": %lld, \"step\": %lld}",
+                           i ? ", " : "", bar + 1,
+                           iv->has_values ? "true" : "false", iv->first, iv->last,
+                           iv->step);
+        char *joined = format("%s%s", loops, one);
+        free(loops);
+        free(one);
+        loops = joined;
+      }
+      char *subs = xstrdup("");
+      for (size_t d = 0; d < count; ++d) {
+        char *joined = format("%s%s\"%s\"", subs, d ? ", " : "", texts[d]);
+        free(subs);
+        subs = joined;
+      }
+      info->scatter_json = format("\"scatter\": {\"loops\": [%s], \"subscripts\": [%s]}",
+                                  loops, subs);
+      tr->general.active = 1;
+      tr->general.count = (int)count;
+      for (size_t d = 0; d < count; ++d)
+        tr->general.nodes[d] = indices[count - 1 - d];
+      *subscripts = xstrdup("@@general@@");
+      return e;
+    }
+    tr->in_subscript = 0;
+  }
 
   char *texts[MAX_RANK];
   linear_form forms[MAX_RANK];
@@ -2038,6 +2251,83 @@ static char *convert(translator *tr, char *value, const char *src,
   emit(tr, indent, "%s = arith.%s %s : %s to %s %s", name, op, value, src, dst,
        loc_text(tr, node));
   return name;
+}
+
+/* --scatter-subscripts: a general subscript as index arithmetic at `indent`;
+   returns its SSA name (general_text has checked it). */
+static char *general_value(translator *tr, const json_value *node, int indent) {
+  node = strip_parens_and_casts(node, kIndexCasts);
+  const char *kind = kind_of(node), *op = opcode_of(node);
+  char *v = NULL;
+  if (strcmp(kind, "IntegerLiteral") == 0) {
+    v = fresh(tr);
+    emit(tr, indent, "%s = arith.constant %lld : index %s", v, int_constant(node),
+         loc_text(tr, node));
+    return v;
+  }
+  if (strcmp(kind, "DeclRefExpr") == 0) {
+    env_entry *e = env_find(tr, referenced_id(node));
+    if (e->kind == ENV_INTSCALAR)
+      return xstrdup(e->sym_name);
+    if (!e->descending)
+      return xstrdup(e->name);
+    linear_form f;
+    affine_index(tr, node, &f);
+    char *b = bound_text(tr, &f, node);
+    v = fresh(tr);
+    emit(tr, indent, "%s = affine.apply %s %s", v, b, loc_text(tr, node));
+    return v;
+  }
+  if (strcmp(kind, "ArraySubscriptExpr") == 0) {
+    env_entry *t = general_table(tr, node);
+    char *ix = general_value(tr, child(node, 1), indent);
+    access_info *info = access_of(tr, t->decl, 1);
+    info->read = 1;
+    info->gathered = 1;
+    info->gather_extent = t->declared_extent;
+    char *raw = fresh(tr);
+    emit(tr, indent, "%s = memref.load %s[%s] : %s %s", raw, t->name, ix, t->type,
+         loc_text(tr, node));
+    v = fresh(tr);
+    emit(tr, indent, "%s = arith.index_cast%s %s : %s to index %s", v,
+         t->is_signed ? "" : "ui", raw, t->elem, loc_text(tr, node));
+    return v;
+  }
+  if (strcmp(kind, "UnaryOperator") == 0) {
+    char *a = general_value(tr, child(node, 0), indent);
+    if (strcmp(op, "+") == 0)
+      return a;
+    char *k = fresh(tr);
+    emit(tr, indent, "%s = arith.constant %d : index %s", k,
+         strcmp(op, "-") == 0 ? 0 : -1, loc_text(tr, node));
+    v = fresh(tr);
+    if (strcmp(op, "-") == 0)
+      emit(tr, indent, "%s = arith.subi %s, %s : index %s", v, k, a, loc_text(tr, node));
+    else
+      emit(tr, indent, "%s = arith.xori %s, %s : index %s", v, a, k, loc_text(tr, node));
+    return v;
+  }
+  if (strcmp(kind, "BinaryOperator") == 0) {
+    char *a = general_value(tr, child(node, 0), indent);
+    char *b = general_value(tr, child(node, 1), indent);
+    v = fresh(tr);
+    emit(tr, indent, "%s = arith.%s %s, %s : index %s", v, general_binary(op), a, b,
+         loc_text(tr, node));
+    return v;
+  }
+  /* ConditionalOperator */
+  const json_value *cond = strip_parens_and_casts(child(node, 0), kIndexCasts);
+  char *a = general_value(tr, child(cond, 0), indent);
+  char *b = general_value(tr, child(cond, 1), indent);
+  char *c = fresh(tr);
+  emit(tr, indent, "%s = arith.cmpi %s, %s, %s : index %s", c,
+       general_compare(opcode_of(cond)), a, b, loc_text(tr, node));
+  char *t = general_value(tr, child(node, 1), indent);
+  char *f = general_value(tr, child(node, 2), indent);
+  v = fresh(tr);
+  emit(tr, indent, "%s = arith.select %s, %s, %s : index %s", v, c, t, f,
+       loc_text(tr, node));
+  return v;
 }
 
 static char *load(translator *tr, const json_value *node, int indent,
@@ -2701,6 +2991,22 @@ static void assignment(translator *tr, const json_value *s, int indent) {
   env_entry *e = array_access(tr, lhs_node, strcmp(opcode, "=") != 0, 1, &idx);
   const char *elem = e->elem;
   char *v;
+  /* --scatter-subscripts: the indices as index arithmetic, read and written
+     with memref.load / memref.store (a computed index is no affine dimension). */
+  const char *op_load = "affine.load", *op_store = "affine.store";
+  if (tr->general.active) {
+    tr->general.active = 0;
+    char *list = xstrdup("");
+    for (int d = 0; d < tr->general.count; ++d) {
+      char *one = general_value(tr, tr->general.nodes[d], indent);
+      char *joined = format("%s%s%s", list, d ? ", " : "", one);
+      free(list);
+      list = joined;
+    }
+    idx = list;
+    op_load = "memref.load";
+    op_store = "memref.store";
+  }
   if (strcmp(opcode, "=") == 0) {
     const char *v_elem;
     v = value(tr, rhs, indent, &v_elem);
@@ -2716,7 +3022,7 @@ static void assignment(translator *tr, const json_value *s, int indent) {
     if (!compute)
       unsupported(s, "compound assignment on a non-floating type");
     char *old = fresh(tr);
-    emit(tr, indent, "%s = affine.load %s[%s] : %s %s", old, e->name, idx,
+    emit(tr, indent, "%s = %s %s[%s] : %s %s", old, op_load, e->name, idx,
          e->type, loc_text(tr, lhs_node));
     old = convert(tr, old, elem, compute, s, indent);
     const char *r_elem;
@@ -2725,7 +3031,7 @@ static void assignment(translator *tr, const json_value *s, int indent) {
     v = arith(tr, opcode[0], old, r, compute, s, indent);
     v = convert(tr, v, compute, elem, s, indent);
   }
-  emit(tr, indent, "affine.store %s, %s[%s] : %s %s", v, e->name, idx,
+  emit(tr, indent, "%s %s, %s[%s] : %s %s", op_store, v, e->name, idx,
        e->type, loc_text(tr, s));
 }
 
@@ -3541,11 +3847,14 @@ static void interface(translator *tr, const json_value *fn,
       fprintf(out, ", \"elem\": \"%s\", \"leading_extent\": %lld, "
                    "\"leading_min\": %lld",
               e->elem, extent, minimum);
-      if (info && info->gathered) {
+      if (info && info->gathered && info->gather_table) {
         fprintf(out, ", \"gather_table\": ");
         json_escape(out, info->gather_table);
         fprintf(out, ", \"gather_extent\": %lld", info->gather_extent);
       }
+      if (info && info->scatter_json)
+        fprintf(out, ", %s, \"scatter_extent\": %lld", info->scatter_json,
+                info->gather_extent);
       if (e->index_table)
         fprintf(out, ", \"index_table\": true, \"signed\": %s",
                 e->is_signed ? "true" : "false");
@@ -3692,6 +4001,7 @@ static void function(translator *tr, const json_value *fn) {
   tr->in_subscript = 0;
   tr->in_gather = 0;
   tr->gather.active = 0;
+  tr->general.active = 0;
   char *args = xstrdup("");
   for (size_t i = 0; i < nparams; ++i) {
     if (!json_get(params[i], "name"))
@@ -4371,7 +4681,8 @@ static void usage(void) {
           "[-DNAME[=VAL]] [-IDIR] [-std=STD] [--function NAME] "
           "[--skip-unsupported] [--symbol-suffix S] [--interface FILE] "
           "[--gemm-sites FILE] [--fp-reassociation] [--static-extents] "
-          "[--modulo-subscripts] [--gather-subscripts] FILE.c [-o OUT.mlir]\n");
+          "[--modulo-subscripts] [--gather-subscripts] [--scatter-subscripts] "
+          "FILE.c [-o OUT.mlir]\n");
 }
 
 /* --opt=value or --opt value. */
@@ -4399,6 +4710,7 @@ int main(int argc, char **argv) {
   long clang_major = 24;
   int skip_unsupported = 0, fp_reassociation = 0;
   int static_extents = 0, modulo_subscripts = 0, gather_subscripts = 0;
+  int scatter_subscripts = 0;
   strvec defines = {0}, includes = {0}, only = {0};
 
   for (int i = 1; i < argc; ++i) {
@@ -4428,6 +4740,8 @@ int main(int argc, char **argv) {
       modulo_subscripts = 1;
     } else if (strcmp(a, "--gather-subscripts") == 0) {
       gather_subscripts = 1;
+    } else if (strcmp(a, "--scatter-subscripts") == 0) {
+      scatter_subscripts = 1;
     } else if ((v = option_value(a, "--output", &i, argc, argv))) {
       output = v;
     } else if (strcmp(a, "-o") == 0) {
@@ -4637,6 +4951,7 @@ int main(int argc, char **argv) {
   tr.static_extents = static_extents;
   tr.modulo_subscripts = modulo_subscripts;
   tr.gather_subscripts = gather_subscripts;
+  tr.scatter_subscripts = scatter_subscripts;
   emit(&tr, 0, "// Generated by systolic-cfront from %s.", display);
   char *defs = xstrdup("");
   for (size_t i = 0; i < defines.n; ++i) {

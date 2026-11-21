@@ -277,6 +277,10 @@ struct GatherPackDimension {
   bool zeroExtend = false;
   std::array<int64_t, 2> coefficient{0, 0};
   int64_t base = 0;
+  /// Plus modScale * ((modCoefficient . (row, column) + modBase) mod modulus) when
+  /// modulus > 0 (a closed-form inverse, exp/general-scatter).
+  int64_t modScale = 0, modulus = 0, modBase = 0;
+  std::array<int64_t, 2> modCoefficient{0, 0};
 };
 
 /// A rows x columns memref.alloc of `elementType`, filled at the builder's point by two
@@ -288,6 +292,35 @@ struct GatherPackDimension {
 Value materializeGatherPack(OpBuilder &builder, Location loc, Value source,
                             ArrayRef<GatherPackDimension> dimensions,
                             std::array<int64_t, 2> shape, Type elementType);
+
+/// Experimental (exp/general-scatter), Track B: the run-time half of a scatter-add.
+///
+/// beginScatter, at the builder's point: for every (r, c) of the rows x columns domain, the
+/// operations `slice` (the nest's own computation of C's indices, `store`'s operands) are
+/// re-emitted with counterI = lowerI + r and counterJ = lowerJ + c; every index of a table
+/// they load and every index of C is checked inside its memref (a failing index is replaced
+/// by 0, so nothing is read or written outside), and the cell of C, row-major, is kept in a
+/// targets buffer. Then an scf.if on "every index was inside": the builder is left at the
+/// start of its then-block; `elseBlock` is where the nest, as written, is to be moved.
+struct ScatterRegions {
+  Value targets;            // memref<(rows * columns) x index>
+  Block *elseBlock = nullptr;
+  Operation *afterThen = nullptr; // the then-block's terminator
+};
+ScatterRegions beginScatter(OpBuilder &builder, Location loc, ArrayRef<Operation *> slice,
+                            Operation *store, Value counterI, int64_t lowerI, Value counterJ,
+                            int64_t lowerJ, Value cMemref, std::array<int64_t, 2> shape);
+
+/// A rows x columns memref.alloc of `elementType` filled with zeros.
+Value materializeZeroMatrix(OpBuilder &builder, Location loc, std::array<int64_t, 2> shape,
+                            Type elementType);
+
+/// The two-layer inverse map, at the builder's point, and the scatter-add: bucket offsets
+/// (one per cell of C, plus one) by counting the targets and a prefix sum; the sources
+/// (cells of `matrix`, row-major) sorted by target, stably; then, for each cell of C with a
+/// source, its value plus those of its sources in order, written once.
+void scatterAddByInverseMap(OpBuilder &builder, Location loc, Value matrix, Value targets,
+                            Value cMemref);
 
 } // namespace systolic
 } // namespace mlir

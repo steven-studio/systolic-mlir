@@ -115,6 +115,10 @@ struct DrivenOperand {
     bool zeroExtend = false; // gathered: index_castui, not index_cast
     std::array<int64_t, 2> coefficient{0, 0};
     int64_t base = 0;
+    /// Track A (exp/general-scatter): plus modScale * ((modCoefficient . (r, c) + modBase)
+    /// mod modulus) when modulus > 0: a row read through a closed-form inverse.
+    int64_t modScale = 0, modulus = 0, modBase = 0;
+    std::array<int64_t, 2> modCoefficient{0, 0};
   };
   llvm::SmallVector<DrivenGather, 2> pack;
 };
@@ -128,6 +132,25 @@ struct RecordDrivenGemm {
   /// Experimental: the memrefs gathered from (dp), which the lowering's alias gate checks
   /// against C as it checks A and B: the record assumes them apart from C.
   llvm::SmallVector<Value, 1> gatherTables;
+  /// Experimental (exp/general-scatter), a C that is no view of its memref:
+  ///   inverse  Track A. C's row is (a i + b) mod M, a bijection of I's range onto [0, M);
+  ///            A (and B) are packed, A's rows read at the closed-form inverse
+  ///            ((a^-1 m + c) mod M), and C is written as a view (operands[2].dimensions).
+  ///   scatter  Track B. C's address is any function of (i, j) the nest computes, through
+  ///            read-only tables at any depth, with collisions. A and B are packed; the tiles
+  ///            write a zeroed M x N matrix T; at run time every target is computed and
+  ///            checked inside C (and every table index inside its table) before anything
+  ///            is written, and the cells of T are added into C through a two-layer inverse
+  ///            map (bucket offsets per cell of C, sources sorted by cell), each cell of C
+  ///            written once. When a check fails the nest runs as written instead.
+  bool inverse = false;
+  bool scatter = false;
+  struct ScatterSource {
+    Operation *store = nullptr;          // C's store: its indices are recomputed
+    llvm::SmallVector<Operation *> slice; // the nest's operations computing them, in order
+    Value counterI, counterJ;            // the band's counters of I and J
+    int64_t lowerI = 0, lowerJ = 0;      // their lower bounds
+  } scatterSource;
   int64_t iterations = 0;                // tables: the iterations evaluated
   std::string where;                     // "nest N of F"
   std::string summary;                   // what was read and checked, for the remark

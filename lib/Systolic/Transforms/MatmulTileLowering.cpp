@@ -18,6 +18,8 @@
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
@@ -457,6 +459,11 @@ Value mlir::systolic::materializeGatherPack(OpBuilder &builder, Location loc, Va
     AffineExpr expr = getAffineConstantExpr(d.base, context) +
                       getAffineDimExpr(0, context) * d.coefficient[0] +
                       getAffineDimExpr(1, context) * d.coefficient[1];
+    if (d.modulus > 0)
+      expr = expr + (getAffineConstantExpr(d.modBase, context) +
+                     getAffineDimExpr(0, context) * d.modCoefficient[0] +
+                     getAffineDimExpr(1, context) * d.modCoefficient[1])
+                            .floorDiv(1) % d.modulus * d.modScale;
     Value at = affine::AffineApplyOp::create(builder, loc, AffineMap::get(2, 0, expr), rc);
     if (d.gathered) {
       Value loaded = memref::LoadOp::create(builder, loc, d.table, ValueRange{at});
@@ -471,4 +478,218 @@ Value mlir::systolic::materializeGatherPack(OpBuilder &builder, Location loc, Va
   Value v = memref::LoadOp::create(builder, loc, source, index);
   affine::AffineStoreOp::create(builder, loc, v, matrix, rc);
   return matrix;
+}
+
+// --------------------------------------------------------------------------------------
+// exp/general-scatter, Track B.
+// --------------------------------------------------------------------------------------
+
+namespace {
+Value indexConstant(OpBuilder &builder, Location loc, int64_t value) {
+  return arith::ConstantIndexOp::create(builder, loc, value);
+}
+/// 0 <= index < size, as an i1.
+Value insideOf(OpBuilder &builder, Location loc, Value index, int64_t size) {
+  Value low = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::sge, index,
+                                    indexConstant(builder, loc, 0));
+  Value high = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::slt, index,
+                                     indexConstant(builder, loc, size));
+  return arith::AndIOp::create(builder, loc, low, high);
+}
+} // namespace
+
+ScatterRegions mlir::systolic::beginScatter(OpBuilder &builder, Location loc,
+                                            ArrayRef<Operation *> slice, Operation *store,
+                                            Value counterI, int64_t lowerI, Value counterJ,
+                                            int64_t lowerJ, Value cMemref,
+                                            std::array<int64_t, 2> shape) {
+  auto cType = cast<MemRefType>(cMemref.getType());
+  const int64_t sources = shape[0] * shape[1];
+  ScatterRegions regions;
+  regions.targets = memref::AllocOp::create(
+      builder, loc, MemRefType::get({sources}, builder.getIndexType()));
+  // Indices found outside their memref, counted.
+  Value bad = memref::AllocOp::create(builder, loc, MemRefType::get({}, builder.getIndexType()));
+  memref::StoreOp::create(builder, loc, indexConstant(builder, loc, 0), bad, ValueRange{});
+  {
+    OpBuilder::InsertionGuard guard(builder);
+    auto rows = affine::AffineForOp::create(builder, loc, 0, shape[0], 1);
+    builder.setInsertionPointToStart(rows.getBody());
+    auto columns = affine::AffineForOp::create(builder, loc, 0, shape[1], 1);
+    builder.setInsertionPointToStart(columns.getBody());
+    Value r = rows.getInductionVar(), c = columns.getInductionVar();
+    MLIRContext *context = builder.getContext();
+    auto shifted = [&](Value iv, int64_t by) -> Value {
+      return affine::AffineApplyOp::create(
+          builder, loc, AffineMap::get(1, 0, getAffineDimExpr(0, context) + by), ValueRange{iv});
+    };
+    IRMapping mapping;
+    mapping.map(counterI, shifted(r, lowerI));
+    mapping.map(counterJ, shifted(c, lowerJ));
+    Value ok = arith::ConstantIntOp::create(builder, loc, 1, 1);
+    // The indices of an access as values of the re-emitted computation.
+    auto indicesOf = [&](Operation *op, SmallVector<Value> &result) {
+      result.clear();
+      AffineMap map;
+      SmallVector<Value> operands;
+      if (auto load = dyn_cast<affine::AffineLoadOp>(op)) {
+        map = load.getAffineMap();
+        operands.assign(load.getMapOperands().begin(), load.getMapOperands().end());
+      } else if (auto st = dyn_cast<affine::AffineStoreOp>(op)) {
+        map = st.getAffineMap();
+        operands.assign(st.getMapOperands().begin(), st.getMapOperands().end());
+      } else if (auto load = dyn_cast<memref::LoadOp>(op)) {
+        for (Value v : load.getIndices())
+          result.push_back(mapping.lookupOrDefault(v));
+        return;
+      } else {
+        for (Value v : cast<memref::StoreOp>(op).getIndices())
+          result.push_back(mapping.lookupOrDefault(v));
+        return;
+      }
+      SmallVector<Value> mapped;
+      for (Value v : operands)
+        mapped.push_back(mapping.lookupOrDefault(v));
+      for (unsigned e = 0; e < map.getNumResults(); ++e)
+        result.push_back(affine::AffineApplyOp::create(builder, loc, map.getSubMap({e}), mapped));
+    };
+    // Each index inside its memref, or 0 in its place and `ok` false.
+    auto checked = [&](SmallVector<Value> &indices, MemRefType type) {
+      Value zero = indexConstant(builder, loc, 0);
+      for (unsigned d = 0; d < indices.size(); ++d) {
+        Value in = insideOf(builder, loc, indices[d], type.getDimSize(d));
+        ok = arith::AndIOp::create(builder, loc, ok, in);
+        indices[d] = arith::SelectOp::create(builder, loc, in, indices[d], zero);
+      }
+    };
+    SmallVector<Value> indices;
+    for (Operation *op : slice) {
+      if (isa<memref::LoadOp, affine::AffineLoadOp>(op)) {
+        Value table = isa<memref::LoadOp>(op) ? cast<memref::LoadOp>(op).getMemRef()
+                                              : cast<affine::AffineLoadOp>(op).getMemRef();
+        indicesOf(op, indices);
+        checked(indices, cast<MemRefType>(table.getType()));
+        Value loaded = memref::LoadOp::create(builder, loc, table, indices);
+        mapping.map(op->getResult(0), loaded);
+        continue;
+      }
+      builder.clone(*op, mapping);
+    }
+    indicesOf(store, indices);
+    checked(indices, cType);
+    // The cell of C, row-major over its static shape.
+    Value flat = indexConstant(builder, loc, 0);
+    for (unsigned d = 0; d < indices.size(); ++d) {
+      flat = arith::MulIOp::create(builder, loc, flat, indexConstant(builder, loc, cType.getDimSize(d)));
+      flat = arith::AddIOp::create(builder, loc, flat, indices[d]);
+    }
+    Value source = affine::AffineApplyOp::create(
+        builder, loc,
+        AffineMap::get(2, 0, getAffineDimExpr(0, context) * shape[1] + getAffineDimExpr(1, context)),
+        ValueRange{r, c});
+    memref::StoreOp::create(builder, loc, flat, regions.targets, ValueRange{source});
+    Value count = memref::LoadOp::create(builder, loc, bad, ValueRange{});
+    Value more = arith::AddIOp::create(builder, loc, count, indexConstant(builder, loc, 1));
+    memref::StoreOp::create(builder, loc, arith::SelectOp::create(builder, loc, ok, count, more), bad,
+                            ValueRange{});
+  }
+  Value count = memref::LoadOp::create(builder, loc, bad, ValueRange{});
+  Value none = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::eq, count,
+                                     indexConstant(builder, loc, 0));
+  auto branch = scf::IfOp::create(builder, loc, none, /*withElseRegion=*/true);
+  regions.elseBlock = &branch.getElseRegion().front();
+  regions.afterThen = branch.getThenRegion().front().getTerminator();
+
+  builder.setInsertionPoint(regions.afterThen);
+  return regions;
+}
+
+Value mlir::systolic::materializeZeroMatrix(OpBuilder &builder, Location loc,
+                                            std::array<int64_t, 2> shape, Type elementType) {
+  Value matrix = memref::AllocOp::create(builder, loc, MemRefType::get(shape, elementType));
+  Value zero = arith::ConstantOp::create(builder, loc, builder.getZeroAttr(elementType));
+  auto rows = affine::AffineForOp::create(builder, loc, 0, shape[0], 1);
+  OpBuilder::InsertionGuard guard(builder);
+  builder.setInsertionPointToStart(rows.getBody());
+  auto columns = affine::AffineForOp::create(builder, loc, 0, shape[1], 1);
+  builder.setInsertionPointToStart(columns.getBody());
+  affine::AffineStoreOp::create(builder, loc, zero, matrix,
+                                ValueRange{rows.getInductionVar(), columns.getInductionVar()});
+  return matrix;
+}
+
+void mlir::systolic::scatterAddByInverseMap(OpBuilder &builder, Location loc, Value matrix,
+                                            Value targets, Value cMemref) {
+  auto cType = cast<MemRefType>(cMemref.getType());
+  auto mType = cast<MemRefType>(matrix.getType());
+  const int64_t cells = cType.getNumElements(), sources = mType.getNumElements();
+  Type index = builder.getIndexType();
+  auto flatOf = [&](Value memref, int64_t n, Type element) -> Value {
+    return memref::ReinterpretCastOp::create(builder, loc, MemRefType::get({n}, element), memref,
+                                             builder.getIndexAttr(0),
+                                             ArrayRef<OpFoldResult>{builder.getIndexAttr(n)},
+                                             ArrayRef<OpFoldResult>{builder.getIndexAttr(1)});
+  };
+  // No dealloc: --systolic-runtime-to-llvm's buffer deallocation frees every buffer here, as
+  // it frees the tables' matrices.
+  Value cFlat = flatOf(cMemref, cells, cType.getElementType());
+  Value mFlat = flatOf(matrix, sources, mType.getElementType());
+  Value zero = indexConstant(builder, loc, 0), one = indexConstant(builder, loc, 1);
+  // Layer one: bucket_offsets[0 .. cells], the first source of each cell of C.
+  Value offsets = memref::AllocOp::create(builder, loc, MemRefType::get({cells + 1}, index));
+  Value cursor = memref::AllocOp::create(builder, loc, MemRefType::get({cells}, index));
+  Value sorted = memref::AllocOp::create(builder, loc, MemRefType::get({sources}, index));
+  auto loop = [&](int64_t lo, int64_t hi, function_ref<void(Value)> body) {
+    auto f = affine::AffineForOp::create(builder, loc, lo, hi, 1);
+    OpBuilder::InsertionGuard guard(builder);
+    builder.setInsertionPointToStart(f.getBody());
+    body(f.getInductionVar());
+  };
+  loop(0, cells + 1, [&](Value m) { memref::StoreOp::create(builder, loc, zero, offsets, ValueRange{m}); });
+  loop(0, sources, [&](Value s) {
+    Value t = memref::LoadOp::create(builder, loc, targets, ValueRange{s});
+    Value next = arith::AddIOp::create(builder, loc, t, one);
+    Value n = memref::LoadOp::create(builder, loc, offsets, ValueRange{next});
+    memref::StoreOp::create(builder, loc, arith::AddIOp::create(builder, loc, n, one), offsets,
+                            ValueRange{next});
+  });
+  loop(1, cells + 1, [&](Value m) {
+    Value previous = arith::SubIOp::create(builder, loc, m, one);
+    Value a = memref::LoadOp::create(builder, loc, offsets, ValueRange{previous});
+    Value b = memref::LoadOp::create(builder, loc, offsets, ValueRange{m});
+    memref::StoreOp::create(builder, loc, arith::AddIOp::create(builder, loc, a, b), offsets, ValueRange{m});
+  });
+  // Layer two: sorted_src_idx[0 .. sources), the sources by cell, each cell's in source order.
+  loop(0, cells, [&](Value m) {
+    Value o = memref::LoadOp::create(builder, loc, offsets, ValueRange{m});
+    memref::StoreOp::create(builder, loc, o, cursor, ValueRange{m});
+  });
+  loop(0, sources, [&](Value s) {
+    Value t = memref::LoadOp::create(builder, loc, targets, ValueRange{s});
+    Value at = memref::LoadOp::create(builder, loc, cursor, ValueRange{t});
+    memref::StoreOp::create(builder, loc, s, sorted, ValueRange{at});
+    memref::StoreOp::create(builder, loc, arith::AddIOp::create(builder, loc, at, one), cursor, ValueRange{t});
+  });
+  // Each cell of C with a source: its value plus its sources' cells of the matrix, in order,
+  // written once.
+  loop(0, cells, [&](Value m) {
+    Value lo = memref::LoadOp::create(builder, loc, offsets, ValueRange{m});
+    Value mNext = arith::AddIOp::create(builder, loc, m, one);
+    Value hi = memref::LoadOp::create(builder, loc, offsets, ValueRange{mNext});
+    Value any = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::ult, lo, hi);
+    auto branch = scf::IfOp::create(builder, loc, any, /*withElseRegion=*/false);
+    OpBuilder::InsertionGuard guard(builder);
+    builder.setInsertionPoint(branch.getThenRegion().front().getTerminator());
+    Value start = memref::LoadOp::create(builder, loc, cFlat, ValueRange{m});
+    auto sum = scf::ForOp::create(builder, loc, lo, hi, one, ValueRange{start});
+    {
+      OpBuilder::InsertionGuard inner(builder);
+      builder.setInsertionPointToStart(sum.getBody());
+      Value s = memref::LoadOp::create(builder, loc, sorted, ValueRange{sum.getInductionVar()});
+      Value v = memref::LoadOp::create(builder, loc, mFlat, ValueRange{s});
+      Value acc = arith::AddFOp::create(builder, loc, sum.getRegionIterArgs()[0], v);
+      scf::YieldOp::create(builder, loc, acc);
+    }
+    memref::StoreOp::create(builder, loc, sum.getResult(0), cFlat, ValueRange{m});
+  });
 }

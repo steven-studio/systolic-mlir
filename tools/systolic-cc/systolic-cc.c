@@ -72,6 +72,15 @@
  * that the entries of dp the nest reads are rows of A, and runs the
  * function as written otherwise. --no-admit-gather turns that off, and the
  * fallback is what it was before it.
+ * Also by default, an array that is written may be subscripted by any integer
+ * expression of the counters, through read-only integer tables at any depth
+ * (systolic-cfront --scatter-subscripts, with the bound of the array and of
+ * every table written as a literal): C[dp1[dp2[i]]][j], C[(3 * i + 1) % 16][j],
+ * C[f(i, j)][g(i, j)]. The pass lowers such a nest by a closed-form inverse
+ * when its rows are a bijection (a i + b) mod M, else by a scatter-add through
+ * a run-time inverse map. The shim evaluates the subscripts at every call and
+ * runs the function as written unless every target is inside the array.
+ * --no-general-scatter turns that off.
  * --no-generalized-gemm compiles as before the fallback
  * existed: no front-end option, no records, the pass without them.
  *
@@ -262,6 +271,7 @@ typedef struct {
   int fp_distribute;            /* --fp-distribute */
   int no_generalized;           /* --no-generalized-gemm */
   int no_admit_gather;          /* --no-admit-gather */
+  int no_general_scatter;       /* --no-general-scatter */
   const char *nest_records;     /* --nest-records FILE */
   const char *nest_report;      /* --nest-report PATH */
   double verify_rtol;
@@ -859,6 +869,55 @@ static char *shim_source(const function_info *offload, size_t n, int verify,
               offload[f].name, i, table);
       gathers = 1;
     }
+    /* And, for an array written at general subscripts (C[dp1[dp2[i]]][j]),
+       every subscript at every value of the counters it reads is inside the
+       array: the kernel's targets are those, and its copy of the array, the
+       snapshot below and the undo cover [0, extent) only. A helper with the
+       function's own parameters, which the subscripts read. */
+    for (size_t i = 0; i < np; ++i) {
+      const json_value *p = json_at(params, i);
+      const json_value *sc = json_get(p, "scatter");
+      if (!sc)
+        continue;
+      const json_value *loops = json_get(sc, "loops");
+      const json_value *subs = json_get(sc, "subscripts");
+      const json_value *dims = json_get(p, "inner_dims");
+      bprintf(&b, "static int __systolic_cc_targets_%s_%zu(%s) {\n", offload[f].name, i,
+              decl.n ? decl.text : "void");
+      for (size_t l = 0; l < json_size(params); ++l)
+        bprintf(&b, "  (void)%s;\n", json_string(json_get(json_at(params, l), "name"), ""));
+      int runs = 1;
+      for (size_t l = 0; l < json_size(loops); ++l)
+        runs = runs && json_bool(json_get(json_at(loops, l), "runs"), 0);
+      if (!runs)
+        bprintf(&b, "  return 1; /* the nest runs no iteration */\n");
+      int depth = 1;
+      for (size_t l = 0; runs && l < json_size(loops); ++l, ++depth) {
+        const json_value *lp = json_at(loops, l);
+        const char *v = json_string(json_get(lp, "name"), "");
+        long long step = json_int(json_get(lp, "step"), 1);
+        bprintf(&b, "%*sfor (long long %s = %lldLL; %s %s %lldLL; %s += %lldLL)\n", 2 * depth, "", v,
+                json_int(json_get(lp, "first"), 0), v, step > 0 ? "<=" : ">=",
+                json_int(json_get(lp, "last"), 0), v, step);
+      }
+      if (runs) {
+        bprintf(&b, "%*s{\n", 2 * depth, "");
+        for (size_t d = 0; d < json_size(subs); ++d) {
+          long long ext = d == 0 ? json_int(json_get(p, "scatter_extent"), 0)
+                                 : json_int(json_at(dims, d - 1), 0);
+          bprintf(&b, "%*s  { const long long __systolic_cc_s = %s;\n"
+                      "%*s    if (__systolic_cc_s < 0 || __systolic_cc_s >= %lldLL) return 0; }\n",
+                  2 * depth, "", json_string(json_at(subs, d), "0"), 2 * depth, "", ext);
+        }
+        bprintf(&b, "%*s}\n  return 1;\n", 2 * depth, "");
+      }
+      bprintf(&b, "}\n");
+      bprintf(&guard, "%s!__systolic_cc_targets_%s_%zu(", guard.n ? " || " : "", offload[f].name, i);
+      for (size_t l = 0; l < json_size(params); ++l)
+        bprintf(&guard, "%s%s", l ? ", " : "", json_string(json_get(json_at(params, l), "name"), ""));
+      bprintf(&guard, ")");
+      gathers = 1;
+    }
 
     bprintf(&b, "void %s(%s);\n", symbol, kdecl.n ? kdecl.text : "void");
     bprintf(&b, "void %s%s(%s);\n", name, REFERENCE_SUFFIX, decl_text);
@@ -1157,6 +1216,8 @@ static void add_frontend_flags(strvec *v, const options *a) {
     push(v, "--modulo-subscripts");
     if (!a->no_admit_gather)
       push(v, "--gather-subscripts");
+    if (!a->no_general_scatter)
+      push(v, "--scatter-subscripts");
   }
 }
 
@@ -1823,7 +1884,7 @@ static void usage(void) {
           "[--keep-dir DIR] [--explain] [--fp-reassociation] "
           "[--no-reduction-batches] [--fp-distribute] "
           "[--no-generalized-gemm] [--nest-records FILE] [--nest-report PATH] "
-          "[--no-admit-gather] [-DNAME[=VAL]] "
+          "[--no-admit-gather] [--no-general-scatter] [-DNAME[=VAL]] "
           "[-IDIR] [-std=STD] "
           "[-ON] FILE.c "
           "-o PROGRAM\n");
@@ -1924,6 +1985,10 @@ int main(int argc, char **argv) {
       a.no_admit_gather = 0;   /* the default */
     } else if (strcmp(s, "--no-admit-gather") == 0) {
       a.no_admit_gather = 1;
+    } else if (strcmp(s, "--general-scatter") == 0) {
+      a.no_general_scatter = 0;   /* the default */
+    } else if (strcmp(s, "--no-general-scatter") == 0) {
+      a.no_general_scatter = 1;
     } else if ((v = option_value(s, "--nest-records", &i, argc, argv))) {
       a.nest_records = v;
     } else if ((v = option_value(s, "--nest-report", &i, argc, argv))) {

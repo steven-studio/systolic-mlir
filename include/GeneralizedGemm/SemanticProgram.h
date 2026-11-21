@@ -195,8 +195,9 @@ struct SemanticProgram {
   bool controlOblivious = false;
   bool addressOblivious = false;
   // Experimental (exp/semgus-indirect-dp). Computed: every address that depends on memory
-  // does so only through one level of gather, a Load from a root the program never writes,
-  // at an index that reads no memory and no state that does: A[dp[i], k]. Such a load is a
+  // does so only through gathers, Loads from roots the program never writes, at indices
+  // that read no state that depends on memory and no memory but such gathers: A[dp[i], k],
+  // C[dp1[dp2[i]], j]. Such a load is a
   // function of its index for the whole run, as long as that root is separate from every
   // root written (a separation the claims then name). `gatherRoots` lists those roots.
   bool addressGather = false;
@@ -237,7 +238,7 @@ inline bool isGatherRoot(const SemanticProgram &program, unsigned root) {
 uint64_t gatherFillModulus(const SemanticProgram &program);
 
 /// Whether every Load in `term` is a gather of an admitted gather program: from a gather
-/// root's entry memory, at an index with no Load. True of a term with no Load.
+/// root's entry memory, at an index whose Loads are gathers too. True of a term with no Load.
 bool gatherLoadsOnly(const SemanticProgram &program, Term term);
 
 /// The domain evidence a freshly imported model supports: none.

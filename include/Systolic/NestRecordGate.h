@@ -157,6 +157,11 @@ struct RecordAtNest {
   // With unmappedViews: the record is VERIFIED_NOT_MAPPED, and its every refusal is that the
   // research proposed no closed form for a view.
   bool viewsUnmapped = false;
+  // Experimental (exp/general-scatter), with unmappedViews: some refusal says that two
+  // logical outputs may share a cell of C (a scatter with collisions), or that C's view
+  // gathers at an index that is not mapped. Only the scatter-add takes such a record.
+  bool outputMayCollide = false;
+  bool outputGathered = false;
 };
 
 /// The record of the nest whose outermost loop is `anchor`, and the checks of the record by

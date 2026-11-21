@@ -1227,8 +1227,10 @@ void Importer::computeObliviousness() {
         Term mem = t->args[0];
         if (mem->op != TermOp::MemVar || written[mem->sort.root])
           return false;
+        // The index may itself be a gather of a read-only root: dp1[dp2[i]] is
+        // still a function of i for the whole run.
         for (unsigned i = 1; i < t->args.size(); ++i)
-          if (depends(t->args[i]))
+          if (!gatherOnly(t->args[i]))
             return false;
         gathers.insert(mem->sort.root);
         return true;
@@ -1244,7 +1246,7 @@ void Importer::computeObliviousness() {
         for (Term index : effect.index)
           if (depends(index) && !gatherOnly(index))
             ok = false;
-    // dp[dp[i]] is refused above: the inner load's index depends on memory.
+    // Any depth of gathers is admitted, each from a root no block writes.
     program.addressGather = ok && !gathers.empty();
     if (program.addressGather)
       program.gatherRoots.assign(gathers.begin(), gathers.end());
@@ -1351,7 +1353,7 @@ bool gatherLoadsOnly(const SemanticProgram &program, Term term) {
     if (mem->op != TermOp::MemVar || !isGatherRoot(program, mem->sort.root))
       return false;
     for (unsigned i = 1; i < term->args.size(); ++i)
-      if (containsOp(term->args[i], TermOp::Load))
+      if (!gatherLoadsOnly(program, term->args[i]))
         return false;
     return true;
   }

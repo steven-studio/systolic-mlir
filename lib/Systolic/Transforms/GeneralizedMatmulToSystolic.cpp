@@ -113,6 +113,34 @@ struct RecordsMode : GeneralizedMatmulOptions {
                              nextGemmIndex);
     };
 
+    auto packed = [&](unsigned x) -> Value {
+      SmallVector<GatherPackDimension, 2> pack;
+      for (const DrivenOperand::DrivenGather &one : g.operands[x].pack)
+        pack.push_back({one.gathered, one.table, one.zeroExtend, one.coefficient, one.base,
+                        one.modScale, one.modulus, one.modBase, one.modCoefficient});
+      return materializeGatherPack(builder, loc, g.operands[x].memref, pack, shapeOf[x], elementType);
+    };
+    if (g.scatter) {
+      // exp/general-scatter, Track B: every target checked at run time; when all are inside,
+      // A and B packed, the tiles into a zeroed matrix, and its cells added into C through
+      // the two-layer inverse map; otherwise the nest as written.
+      const RecordDrivenGemm::ScatterSource &src = g.scatterSource;
+      const size_t regionCount = regions;
+      ScatterRegions scatterRegions = beginScatter(builder, loc, src.slice, src.store, src.counterI, src.lowerI,
+                                            src.counterJ, src.lowerJ, C, {M, N});
+      Value aTensor = asTensor(packed(0), shapeOf[0], /*writable=*/false);
+      Value bTensor = asTensor(packed(1), shapeOf[1], /*writable=*/false);
+      Value product = materializeZeroMatrix(builder, loc, {M, N}, elementType);
+      Value result = runTiles(aTensor, bTensor, asTensor(product, {M, N}, /*writable=*/true));
+      writeBackMatmulResult(builder, loc, result, product);
+      scatterAddByInverseMap(builder, loc, product, scatterRegions.targets, C);
+      anchor->moveBefore(scatterRegions.elseBlock->getTerminator());
+      if (report)
+        anchor->getParentOp()->emitRemark()
+            << "GEMM " << M << "x" << N << "x" << K << " of " << g.where << " lowered from its record as "
+            << regionCount << " exact region(s) (" << g.summary << ")";
+      return success();
+    }
     if (!g.tables) {
       // The record's formulas: each operand a view of its memref.
       std::array<LogicalOperand, 3> operand;
@@ -121,12 +149,8 @@ struct RecordsMode : GeneralizedMatmulOptions {
         LogicalOperand &o = operand[x];
         o.memref = d.memref;
         // Experimental: a gathered operand, packed into its rows x columns matrix first.
-        if (!d.pack.empty()) {
-          SmallVector<GatherPackDimension, 2> pack;
-          for (const DrivenOperand::DrivenGather &one : d.pack)
-            pack.push_back({one.gathered, one.table, one.zeroExtend, one.coefficient, one.base});
-          o.memref = materializeGatherPack(builder, loc, d.memref, pack, shapeOf[x], elementType);
-        }
+        if (!d.pack.empty())
+          o.memref = packed(x);
         const unsigned rank = cast<MemRefType>(o.memref.getType()).getRank();
         o.offsets.assign(rank, 0);
         o.sizes.assign(rank, 1);

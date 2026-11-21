@@ -1283,7 +1283,10 @@ another file, add to `RULES` in the script.
 Since 2026-11-21 the fallback also takes one-level gathers by default, `A[dp[i]][k]` with
 dp a read-only integer array (`systolic-cfront --gather-subscripts`, the tool's
 `--admit-gather`, a check of dp's entries in the shim). `--no-admit-gather` turns them off.
-See docs/GENERALIZED_GEMM_G3B.md, "Experimental: one-level gathers".
+See docs/GENERALIZED_GEMM_G3B.md, "Experimental: one-level gathers". It also writes C at
+non-affine addresses (`--scatter-subscripts`): through a closed-form inverse, or a scatter-add
+through a run-time inverse map, with the targets checked in the shim (`--no-general-scatter`
+turns it off). See "Experimental: outputs at non-affine addresses" there.
 
 `systolic-cc` now tries the Generalized GEMM after its own GEMM lowering, nest by nest, by
 default: a nest goes to the FPGA by the standard path when that path takes it, else from its

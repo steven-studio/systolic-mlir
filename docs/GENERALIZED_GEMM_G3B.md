@@ -410,3 +410,97 @@ was before.
 **Limits.** One level, a one-dimensional dp of static shape, read-only for the whole
 nest, and no gather into C (a scatter would need Injective(dp) for C1). The bounds of
 `A[dp[i]]` are the program's own: the lowering reads the same addresses as the nest.
+
+## Experimental: outputs at non-affine addresses (2026-11-21)
+
+On by default in systolic-cc's Generalized GEMM fallback (`--no-general-scatter` turns it
+off). C may now be written at any address of (i, j) that the nest computes: `C[(3 i + 1) % 16][j]`,
+`C[dp1[dp2[i]]][j]`, `C[(i * i + j) % 16][i > j ? (i ^ j) & 7 : j / 2]`. Several targets may
+coincide.
+
+**Front end** (`systolic-cfront --scatter-subscripts`, given with `--static-extents`).
+
+- A subscript of a written array may be any integer expression. It may read loop counters,
+  signed integer parameters, literals, and one-dimensional integer tables to any depth.
+- The operators are `+ - * / % & | ^ << >>`, unary `-` and `~`, and `?:` on an integer
+  comparison.
+- It becomes index arithmetic (`divsi`, `remsi`, `select`, and so on: C's `int` result
+  wherever C defines one), read and written with `memref.load` and `memref.store`.
+- The array's bound, and every table's bound, must be written as an integer literal.
+- Refused, so the function stays C: an unsigned computation (it wraps), a counter whose
+  bounds read another counter, a second general write of the same array.
+- The interface gives the expressions as C text, together with the counters and their ranges.
+
+**Research.** `addressGather` now admits gathers at any depth, each from a root that no block
+writes. With that, `C[dp1[dp2[i]]][j]` is VERIFIED_NOT_MAPPED: Theorem 13 VERIFIED, the
+coordinates SYMBOLIC_EXACT, C's view PROVEN at the symbolic tier. The records keep their
+refusals ("not affine", "gathers at an index that is not mapped", "two logical outputs may
+share a cell of C"). The production gate lets only the scatter-add take a record whose
+remaining refusals are of those kinds.
+
+**Track A, a closed-form inverse.** Applies when one dimension of C's address is
+`(affine form of i) mod M`, the other is affine in j, the dividend is never negative, I runs
+exactly M times, and gcd(a, M) = 1.
+
+- The lowering computes a⁻¹ mod M by the extended Euclidean algorithm. The inverse is
+  `(a⁻¹ m + c) mod M`; for `(3 i + 1) mod 16` it is `(11 m + 5) mod 16`.
+- It checks `inv(φ(y)) = y` for every y in I's range, exactly.
+- A is packed as `A_packed[m][k] = A[inv(m)][k]` (an affine map with `mod`), and C is
+  written as a view. Nothing is built at run time.
+- The research record proves the view (A1) and the fold. The inverse is the nest's own
+  arithmetic, checked at compile time, as the tables are.
+- Other static bijections (bit reversal, polynomials) take the existing compile-time tables.
+
+**Track B, a scatter-add through a run-time inverse map.** Applies to any other address of
+(i, j): one that reads a table, or one where targets collide.
+
+- The lowering re-emits the nest's own computation of C's indices; every operation must be
+  arith, `affine.apply`, or a load from a read-only integer table argument of static shape.
+- In the kernel, for every (i, j), each table index and each index of C is checked inside
+  its memref; a failing index is replaced by 0, so nothing is read or written outside.
+- When every index is inside:
+  - A and B are packed;
+  - the tiles write a zeroed M x N matrix T;
+  - `bucket_offsets[0 .. |C|]` is built by counting the targets and taking a prefix sum;
+  - `sorted_src_idx[0 .. M N)` holds the sources by cell of C, stably;
+  - each cell of C that has a source gets its value plus its sources' cells of T, in source
+    order, and is written once.
+- Otherwise the nest runs as written: it is moved into the else branch of the `scf.if`.
+- Collisions change the order of the floating-point additions, so the floating-point policy
+  applies as for every tile: `reassoc`, or `allow-fp-reassociation`.
+- The CSR is built by the kernel's host code, after the tiles and before C is written; the
+  shim does not build it. Handing it over from the shim would change the kernel's C ABI.
+
+**Guards.**
+
+- The shim evaluates the C text of the subscripts at every value of the counters they read,
+  and runs `NAME__systolic_reference` unless every target is inside `[0, bound)`. C does not
+  enforce the bound written, and the snapshot and the undo cover `[0, bound)` only, so a
+  target outside never reaches the kernel.
+- The kernel's own check is the second line of defence. It also covers a table index past a
+  table's bound. When it fails, the nest runs as written. Under systolic-cc that path is then
+  not "completed" (0 invocations), so the shim restores the snapshot and runs the reference.
+  This is correct because the shim has already shown every target inside the snapshot.
+
+**Validation.**
+
+- `test/SystolicCC/generalized_non_affine_scatter.c`, bit for bit:
+  - (a) the permutation by Track A;
+  - (b) two levels of tables with collisions by Track B;
+  - a coupled 2-D address with collisions by Track B;
+  - (c) a target past C's bound, sent to the CPU by the shim (CPU Executed with the mock
+    hardware);
+  - `--no-general-scatter`: the functions stay C.
+- `test/Systolic/nest_records_scatter.mlir`: the IR of both tracks.
+- The kernel's fallback was run outside systolic-cc: 0 invocations, and all 256 cells right,
+  including those past the 16 rows of the descriptor.
+- Not run: the FPGA board, the research fuzz and mutation suites.
+
+**Limits.**
+
+- Track A covers only `(a i + b) mod M` on C's row with I running exactly M times.
+- Track B needs C's address to read only I and J (V1h), and A and B affine.
+- The shim's check costs one evaluation of the subscripts per point of (i, j) per call.
+- Not every integer expression can be verified: the research's grammar and solver limits
+  apply. A nest it does not verify stays on the host.
+

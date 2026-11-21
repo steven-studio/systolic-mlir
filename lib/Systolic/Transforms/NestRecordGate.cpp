@@ -339,14 +339,26 @@ RecordAtNest checkRecordAtNest(const NestRecordFile &file, const BoundNests &bou
   // Stage 3's tables (unmappedViews): a record VERIFIED_NOT_MAPPED only because the research
   // proposed no closed form for some view; the lowering then reads those views off the nest
   // itself, over its whole static domain.
-  bool viewsUnmapped = false;
+  bool viewsUnmapped = false, outputMayCollide = false, outputGathered = false;
   if (unmappedViews && *status == "VERIFIED_NOT_MAPPED" && !refusals->empty()) {
     viewsUnmapped = true;
     for (const json::Value &value : *refusals) {
       std::optional<StringRef> text = value.getAsString();
-      if (!text || !isUnmappedViewRefusal(*text))
-        viewsUnmapped = false;
+      if (text && isUnmappedViewRefusal(*text))
+        continue;
+      // exp/general-scatter: what only the scatter-add takes.
+      if (text && text->starts_with("two logical outputs may share a cell of C")) {
+        outputMayCollide = true;
+        continue;
+      }
+      if (text && text->starts_with("dimension ") && text->contains(" of the view of C gathers at ")) {
+        outputGathered = true;
+        continue;
+      }
+      viewsUnmapped = false;
     }
+    if (!viewsUnmapped)
+      outputMayCollide = outputGathered = false;
   }
   if (*status != "VERIFIED" && !viewsUnmapped) {
     std::string first;
@@ -398,6 +410,8 @@ RecordAtNest checkRecordAtNest(const NestRecordFile &file, const BoundNests &bou
   out.gemm = gemm;
   out.holdsFor = holdsFor->str();
   out.viewsUnmapped = viewsUnmapped;
+  out.outputMayCollide = outputMayCollide;
+  out.outputGathered = outputGathered;
   return out;
 }
 

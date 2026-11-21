@@ -1071,7 +1071,7 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
   // was, and a load in an address is refused as before.
   bool recordGathers = false;
   if (const json::Object *views = gemm.getObject("views"))
-    for (const char *name : {"A", "B"})
+    for (const char *name : {"A", "B", "C"})
       if (const json::Object *one = views->getObject(name))
         if (const json::Array *dimensions = one->getArray("dimensions"))
           for (const json::Value &dimension : *dimensions)
@@ -1099,11 +1099,19 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
     gatherValues[cast->getResult(0)] = {load, *tableAccess, isa<arith::IndexCastUIOp>(cast)};
   }
   llvm::SmallPtrSet<Operation *, 2> gatherLoads;
+  SmallVector<Operation *, 2> addressTables; // integer loads of a gathering record's addresses
   for (auto &[value, gather] : gatherValues)
     gatherLoads.insert(gather.load);
   for (Operation &op : body->without_terminator()) {
     if (gatherLoads.contains(&op))
       continue;
+    // With a record that gathers, an integer load is a table read for an address (the
+    // update's three loads are of f32): C's (exp/general-scatter), checked by the scatter-add.
+    if (recordGathers && isa<memref::LoadOp, affine::AffineLoadOp>(op) &&
+        op.getResult(0).getType().isSignlessIntOrIndex()) {
+      addressTables.push_back(&op);
+      continue;
+    }
     if (isa<memref::LoadOp, affine::AffineLoadOp>(op))
       loads.push_back(&op);
     else if (isa<memref::StoreOp, affine::AffineStoreOp>(op))
@@ -1112,6 +1120,9 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
       products.push_back(mul);
     else if (auto add = dyn_cast<arith::AddFOp>(op))
       sums.push_back(add);
+    else if (isa<arith::CmpIOp>(op) ||
+             (isa<arith::SelectOp>(op) && op.getResult(0).getType().isSignlessIntOrIndex()))
+      continue; // index arithmetic of an address (exp/general-scatter: C[i > j ? ... : ...])
     else if (!isa<arith::ConstantOp, arith::AddIOp, arith::SubIOp, arith::MulIOp, arith::DivSIOp, arith::DivUIOp,
                    arith::CeilDivSIOp, arith::FloorDivSIOp, arith::RemSIOp, arith::RemUIOp, arith::MinSIOp,
                    arith::MaxSIOp, arith::MinUIOp, arith::MaxUIOp, arith::AndIOp, arith::OrIOp, arith::XOrIOp,
@@ -1257,8 +1268,14 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
 
   // Experimental: the roots the nest gathers from (dp). Neither A, B nor C.
   llvm::SmallVector<int64_t, 1> gatherRootNumbers;
-  for (auto &[value, gather] : gatherValues) {
-    const int64_t number = rootOf(gather.access.memref);
+  SmallVector<Value, 2> tableMemrefs;
+  for (auto &[value, gather] : gatherValues)
+    tableMemrefs.push_back(gather.access.memref);
+  for (Operation *op : addressTables)
+    if (std::optional<Access> t = accessOf(op))
+      tableMemrefs.push_back(t->memref);
+  for (Value tableMemref : tableMemrefs) {
+    const int64_t number = rootOf(tableMemref);
     if (number < 0)
       return refuse("the nest gathers from a memref that is no root of the function");
     if (number == rootNumber[0] || number == rootNumber[1] || number == rootNumber[2])
@@ -1637,6 +1654,305 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
     if (!out.gatherTables.empty())
       out.summary += "; A or B packed by the record's gather before the tiles";
     return out;
+  }
+
+  // ---------------------------------------------------------------------------------
+  // exp/general-scatter: a C that is no view of its memref. Track A, C's row a bijection
+  // (a i + b) mod M inverted in closed form; Track B, any address of (i, j) the nest
+  // computes, through read-only tables, with collisions, by a scatter-add through a
+  // run-time inverse map. Both read A and B by their affine forms, packed. Otherwise the
+  // tables below.
+  // ---------------------------------------------------------------------------------
+  {
+    Forms forms(counters, carriedForms);
+    auto formsOf = [&](const Access &a, SmallVector<std::optional<Form>, 3> &result) {
+      result.clear();
+      if (a.map) {
+        for (AffineExpr expr : a.map.getResults())
+          result.push_back(forms.ofExpr(expr, a.map.getNumDims(), a.operands));
+      } else {
+        for (Value v : a.operands)
+          result.push_back(forms.of(v));
+      }
+    };
+    // A form over the band's counters as base + coefficient . (y_role0, y_role1) of operand x.
+    auto overRoles = [&](unsigned x, const Form &f, std::array<int64_t, 2> &coefficient,
+                         int64_t &base) -> bool {
+      coefficient = {0, 0};
+      std::optional<int64_t> b = f.constant;
+      for (unsigned p = 0; p < 3; ++p) {
+        if (f.coefficient[p] == 0)
+          continue;
+        int role = -1;
+        for (int r = 0; r < 2; ++r)
+          if (levelOf[kRolesOf[x][r]] == p)
+            role = r;
+        if (role < 0)
+          return false;
+        coefficient[role] = f.coefficient[p];
+        std::optional<int64_t> term = llvm::checkedMul(f.coefficient[p], lower[kRolesOf[x][role]]);
+        b = b && term ? llvm::checkedAdd(*b, *term) : std::nullopt;
+      }
+      if (!b)
+        return false;
+      base = *b;
+      return true;
+    };
+    auto inside = [&](unsigned x, const std::array<int64_t, 2> &coefficient, int64_t base, int64_t size) {
+      std::optional<int64_t> lo = base, hi = base;
+      for (int r = 0; r < 2; ++r) {
+        std::optional<int64_t> span = llvm::checkedMul(coefficient[r], extent[kRolesOf[x][r]] - 1);
+        if (!span || !lo || !hi)
+          return false;
+        lo = llvm::checkedAdd(*lo, std::min<int64_t>(*span, 0));
+        hi = llvm::checkedAdd(*hi, std::max<int64_t>(*span, 0));
+      }
+      return lo && hi && *lo >= 0 && *hi < size;
+    };
+    // A or B packed by its affine forms: matrix (row, column) = (role 0, role 1).
+    auto packOf = [&](unsigned x, SmallVector<DrivenOperand::DrivenGather, 2> &pack,
+                      std::string &problem) -> bool {
+      SmallVector<std::optional<Form>, 3> f;
+      formsOf(access[x], f);
+      pack.clear();
+      for (unsigned d = 0; d < f.size(); ++d) {
+        DrivenOperand::DrivenGather one;
+        if (!f[d] || !overRoles(x, *f[d], one.coefficient, one.base)) {
+          problem = std::string("dimension ") + std::to_string(d) + " of " + kOperandName[x] +
+                    " is no affine form of its roles";
+          return false;
+        }
+        if (!inside(x, one.coefficient, one.base, type[x].getDimSize(d))) {
+          problem = std::string(kOperandName[x]) + " is read out of bounds along dimension " + std::to_string(d);
+          return false;
+        }
+        pack.push_back(one);
+      }
+      return true;
+    };
+    auto sameIndex = [](const Access &a, const Access &b) { return a.map == b.map && a.operands == b.operands; };
+    const Access &st = access[2];
+
+    // Track A.
+    std::string whyA;
+    auto trackA = [&]() -> bool {
+      if (type[2].getRank() != 2) {
+        whyA = "C is not of rank 2";
+        return false;
+      }
+      if (!sameIndex(*c, st)) {
+        whyA = "the update reads C at other index values than it writes";
+        return false;
+      }
+      std::optional<Form> inner;
+      int64_t modulus = 0;
+      int modDim = -1;
+      std::array<std::optional<Form>, 2> plain;
+      for (unsigned d = 0; d < 2; ++d) {
+        std::optional<Form> in;
+        int64_t m = 0;
+        if (st.map) {
+          AffineExpr e = st.map.getResult(d);
+          if (e.getKind() == AffineExprKind::Mod)
+            if (auto k = dyn_cast<AffineConstantExpr>(cast<AffineBinaryOpExpr>(e).getRHS())) {
+              m = k.getValue();
+              in = forms.ofExpr(cast<AffineBinaryOpExpr>(e).getLHS(), st.map.getNumDims(), st.operands);
+            }
+          if (!m)
+            plain[d] = forms.ofExpr(e, st.map.getNumDims(), st.operands);
+        } else {
+          Operation *def = st.operands[d].getDefiningOp();
+          if (def && isa<arith::RemUIOp, arith::RemSIOp>(def))
+            if (auto k = def->getOperand(1).getDefiningOp<arith::ConstantIndexOp>()) {
+              m = k.value();
+              in = forms.of(def->getOperand(0));
+            }
+          if (!m)
+            plain[d] = forms.of(st.operands[d]);
+        }
+        if (m) {
+          if (modDim >= 0 || !in || m <= 0) {
+            whyA = "C's address is not one dimension (affine) mod M beside an affine one";
+            return false;
+          }
+          modDim = (int)d;
+          modulus = m;
+          inner = in;
+        }
+      }
+      if (modDim < 0 || !plain[1 - modDim]) {
+        whyA = "C's address is not one dimension (affine) mod M beside an affine one";
+        return false;
+      }
+      const unsigned pI = levelOf[0];
+      for (unsigned p = 0; p < 3; ++p)
+        if (p != pI && inner->coefficient[p] != 0) {
+          whyA = "the dimension mod M reads another loop than I's";
+          return false;
+        }
+      const __int128 cI = inner->coefficient[pI];
+      const __int128 b0 = (__int128)inner->constant + cI * lower[0];
+      const __int128 low = b0 + std::min<__int128>(0, cI * (extent[0] - 1));
+      if (low < 0) {
+        whyA = "the dividend of the remainder may be negative";
+        return false;
+      }
+      if (extent[0] != modulus || modulus > type[2].getDimSize(modDim)) {
+        whyA = "I runs " + std::to_string(extent[0]) + " times and the modulus is " + std::to_string(modulus) +
+               ": no bijection onto the rows of C";
+        return false;
+      }
+      const __int128 M = modulus;
+      const __int128 a = ((cI % M) + M) % M, b = ((b0 % M) + M) % M;
+      // The inverse of a modulo M (extended Euclid), when gcd(a, M) = 1.
+      __int128 r0 = M, r1 = a, t0 = 0, t1 = 1;
+      while (r1 != 0) {
+        __int128 q = r0 / r1, r2 = r0 - q * r1, t2 = t0 - q * t1;
+        r0 = r1, r1 = r2, t0 = t1, t1 = t2;
+      }
+      if (r0 != 1) {
+        whyA = "the multiplier and the modulus are not coprime: (a i + b) mod M is no bijection";
+        return false;
+      }
+      const __int128 inv = ((t0 % M) + M) % M, cc = (M - (inv * b) % M) % M;
+      for (__int128 y = 0; y < M; ++y) {
+        const __int128 phi = (a * y + b) % M;
+        if ((inv * phi + cc) % M != y) {
+          whyA = "the closed-form inverse does not invert the address";
+          return false;
+        }
+      }
+      std::array<int64_t, 2> cJ;
+      int64_t baseJ;
+      if (!overRoles(2, *plain[1 - modDim], cJ, baseJ) || cJ[0] != 0 || cJ[1] == 0 ||
+          !inside(2, cJ, baseJ, type[2].getDimSize(1 - modDim))) {
+        whyA = "C's other dimension is no affine form of J inside C";
+        return false;
+      }
+      SmallVector<DrivenOperand::DrivenGather, 2> packA, packB;
+      if (!packOf(0, packA, whyA) || !packOf(1, packB, whyA))
+        return false;
+      for (DrivenOperand::DrivenGather &one : packA) {
+        if (one.coefficient[0] == 0)
+          continue;
+        // y_I = inv(m): the row of A_packed is C's row m.
+        one.modScale = one.coefficient[0];
+        one.coefficient[0] = 0;
+        one.modulus = modulus;
+        one.modCoefficient = {(int64_t)inv, 0};
+        one.modBase = (int64_t)cc;
+      }
+      out.inverse = true;
+      out.operands[0].pack = std::move(packA);
+      out.operands[1].pack = std::move(packB);
+      for (unsigned x = 0; x < 2; ++x) {
+        out.operands[x].dimensions.push_back({0, 1, 0});
+        out.operands[x].dimensions.push_back({1, 1, 0});
+      }
+      for (unsigned d = 0; d < 2; ++d)
+        out.operands[2].dimensions.push_back((int)d == modDim ? DrivenDimension{0, 1, 0}
+                                                              : DrivenDimension{1, cJ[1], baseJ});
+      out.summary = "inverse: C's rows (" + std::to_string((long long)a) + " i + " + std::to_string((long long)b) +
+                    ") mod " + std::to_string(modulus) + ", a bijection, inverted in closed form (" +
+                    std::to_string((long long)inv) + " m + " + std::to_string((long long)cc) + ") mod " +
+                    std::to_string(modulus) + "; A packed by the inverse, C written as a view";
+      return true;
+    };
+
+    // Track B: the slice of the nest that computes C's indices.
+    std::string whyB;
+    bool readsTable = false;
+    Operation *anchorOp = band.front().op;
+    llvm::SmallPtrSet<Operation *, 16> inSlice;
+    auto sliceOk = [&]() -> bool {
+      if (!sameIndex(*c, st)) {
+        whyB = "the update reads C at other index values than it writes";
+        return false;
+      }
+      SmallVector<Value, 8> work(st.operands.begin(), st.operands.end());
+      while (!work.empty()) {
+        Value v = work.pop_back_val();
+        if (auto arg = dyn_cast<BlockArgument>(v)) {
+          if (anchorOp->isAncestor(arg.getOwner()->getParentOp()) && v != counters[levelOf[0]] &&
+              v != counters[levelOf[1]]) {
+            whyB = "C's address reads the loop of K or a value a loop carries";
+            return false;
+          }
+          continue;
+        }
+        Operation *def = v.getDefiningOp();
+        if (!anchorOp->isAncestor(def) || !inSlice.insert(def).second)
+          continue;
+        if (def->getNumRegions() != 0) {
+          whyB = "C's address is computed by an operation with regions";
+          return false;
+        }
+        if (isa<memref::LoadOp, affine::AffineLoadOp>(def)) {
+          std::optional<Access> t = accessOf(def);
+          auto tableType = t ? dyn_cast<MemRefType>(t->memref.getType()) : MemRefType();
+          bool readOnly = t && isa<BlockArgument>(t->memref) && !anchorOp->isAncestor(
+                              cast<BlockArgument>(t->memref).getOwner()->getParentOp());
+          for (Operation *user : t ? t->memref.getUsers() : Value().getUsers())
+            readOnly = readOnly && isa<memref::LoadOp, affine::AffineLoadOp>(user);
+          if (!readOnly || !tableType || !tableType.hasStaticShape() || !tableType.getLayout().isIdentity() ||
+              !tableType.getElementType().isSignlessIntOrIndex() || t->memref == access[0].memref ||
+              t->memref == access[1].memref || t->memref == access[2].memref) {
+            whyB = "C's address loads from a memref that is no read-only integer table argument of static shape";
+            return false;
+          }
+          readsTable = true;
+          work.append(t->operands.begin(), t->operands.end());
+          continue;
+        }
+        if (!isa<arith::ArithDialect>(def->getDialect()) && !isa<affine::AffineApplyOp>(def)) {
+          whyB = std::string("C's address uses ") + def->getName().getStringRef().str() +
+                 ", which the scatter-add does not re-emit";
+          return false;
+        }
+        work.append(def->getOperands().begin(), def->getOperands().end());
+      }
+      return true;
+    };
+    const bool sliceRead = sliceOk();
+    const bool needScatter = at.outputMayCollide || at.outputGathered || (sliceRead && readsTable);
+    if (!needScatter && trackA())
+      return out;
+    if (needScatter) {
+      if (!sliceRead)
+        return refuse("the scatter-add: " + whyB);
+      if (indexWidth != 64)
+        return refuse("the scatter-add re-emits 64-bit index arithmetic, and the program's index has " +
+                      std::to_string(indexWidth) + " bits");
+      SmallVector<DrivenOperand::DrivenGather, 2> packA, packB;
+      if (!packOf(0, packA, whyB) || !packOf(1, packB, whyB))
+        return refuse("the scatter-add: " + whyB);
+      out.scatter = true;
+      out.operands[0].pack = std::move(packA);
+      out.operands[1].pack = std::move(packB);
+      for (unsigned x = 0; x < 2; ++x) {
+        out.operands[x].dimensions.push_back({0, 1, 0});
+        out.operands[x].dimensions.push_back({1, 1, 0});
+      }
+      for (Operation *op : inSlice)
+        if (std::optional<Access> t = isa<memref::LoadOp, affine::AffineLoadOp>(op) ? accessOf(op) : std::nullopt)
+          if (!llvm::is_contained(out.gatherTables, t->memref))
+            out.gatherTables.push_back(t->memref);
+      out.scatterSource.store = st.op;
+      anchorOp->walk<WalkOrder::PreOrder>([&](Operation *op) {
+        if (inSlice.contains(op))
+          out.scatterSource.slice.push_back(op);
+      });
+      out.scatterSource.counterI = counters[levelOf[0]];
+      out.scatterSource.counterJ = counters[levelOf[1]];
+      out.scatterSource.lowerI = lower[0];
+      out.scatterSource.lowerJ = lower[1];
+      out.summary = std::string("scatter-add: C's address re-emitted at run time") +
+                    (readsTable ? " through read-only tables" : "") +
+                    (at.outputMayCollide ? ", with collisions" : "") +
+                    ", every index checked before a write, a two-layer inverse map (bucket offsets, "
+                    "sources sorted by cell of C), each cell of C written once";
+      return out;
+    }
   }
 
   // ---------------------------------------------------------------------------------
