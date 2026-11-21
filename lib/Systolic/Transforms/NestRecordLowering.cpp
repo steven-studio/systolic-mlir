@@ -1047,11 +1047,13 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
   SmallVector<arith::MulFOp, 1> products;
   SmallVector<arith::AddFOp, 1> sums;
   // Experimental (exp/semgus-indirect-dp): a gather load, dp[...], an integer or index load
-  // whose value, through at most one index_cast or index_castui, is used only as an index of
-  // memref.loads of the body: A[dp[i], k]. It is no access of the update; the formulas match
-  // it with the record's gather (below).
+  // (memref.load, or affine.load as systolic-cfront writes it) whose value, through at most
+  // one index_cast or index_castui, is used only as an index of memref.loads of the body:
+  // A[dp[i], k]. It is no access of the update; the formulas match it with the record's
+  // gather (below).
   struct GatherValue {
-    memref::LoadOp load;
+    Operation *load = nullptr;
+    Access access;
     bool zeroExtend = false;
   };
   llvm::DenseMap<Value, GatherValue> gatherValues;
@@ -1076,12 +1078,16 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
             if (const json::Object *object = dimension.getAsObject())
               recordGathers = recordGathers || object->getObject("gather");
   for (Operation &op : body->without_terminator()) {
-    auto load = dyn_cast<memref::LoadOp>(op);
-    if (!recordGathers || !load || !load.getType().isSignlessIntOrIndex())
+    Operation *load = isa<memref::LoadOp, affine::AffineLoadOp>(op) ? &op : nullptr;
+    if (!recordGathers || !load || !load->getResult(0).getType().isSignlessIntOrIndex())
       continue;
-    Value result = load.getResult();
+    std::optional<Access> tableAccess = accessOf(load);
+    if (!tableAccess || tableAccess->operands.empty() ||
+        (tableAccess->map && tableAccess->map.getNumResults() != 1))
+      continue;
+    Value result = load->getResult(0);
     if (onlyIndexOfLoads(result) && result.getType().isIndex()) {
-      gatherValues[result] = {load, false};
+      gatherValues[result] = {load, *tableAccess, false};
       continue;
     }
     if (!result.hasOneUse())
@@ -1090,7 +1096,7 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
     if (cast->getBlock() != body || !isa<arith::IndexCastOp, arith::IndexCastUIOp>(cast) ||
         !onlyIndexOfLoads(cast->getResult(0)))
       continue;
-    gatherValues[cast->getResult(0)] = {load, isa<arith::IndexCastUIOp>(cast)};
+    gatherValues[cast->getResult(0)] = {load, *tableAccess, isa<arith::IndexCastUIOp>(cast)};
   }
   llvm::SmallPtrSet<Operation *, 2> gatherLoads;
   for (auto &[value, gather] : gatherValues)
@@ -1252,7 +1258,7 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
   // Experimental: the roots the nest gathers from (dp). Neither A, B nor C.
   llvm::SmallVector<int64_t, 1> gatherRootNumbers;
   for (auto &[value, gather] : gatherValues) {
-    const int64_t number = rootOf(gather.load.getMemRef());
+    const int64_t number = rootOf(gather.access.memref);
     if (number < 0)
       return refuse("the nest gathers from a memref that is no root of the function");
     if (number == rootNumber[0] || number == rootNumber[1] || number == rootNumber[2])
@@ -1306,8 +1312,8 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
   for (unsigned x = 0; x < 3; ++x)
     out.operands[x].memref = access[x].memref;
   for (auto &[value, gather] : gatherValues)
-    if (!llvm::is_contained(out.gatherTables, gather.load.getMemRef()))
-      out.gatherTables.push_back(gather.load.getMemRef());
+    if (!llvm::is_contained(out.gatherTables, gather.access.memref))
+      out.gatherTables.push_back(gather.access.memref);
 
   // The record's affine closed form of dimension d of operand x, over the band's counters
   // (the record's levels are the band's loops, checked above). Failure when the record has
@@ -1461,8 +1467,9 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
           // The gather: the record's root, extension, element and index are the nest's.
           if (!gather)
             return refuse("the nest gathers " + where + ", and the record does not");
-          memref::LoadOp load = found->second.load;
-          auto tableType = dyn_cast<MemRefType>(load.getMemRef().getType());
+          const Access &tableAccess = found->second.access;
+          const Type loadedType = found->second.load->getResult(0).getType();
+          auto tableType = dyn_cast<MemRefType>(tableAccess.memref.getType());
           const json::Object *gatherRoot = gather->getObject("root");
           std::optional<int64_t> gatherRootNumber = gatherRoot ? gatherRoot->getInteger("root") : std::nullopt;
           std::optional<StringRef> extend = gather->getString("extend");
@@ -1470,20 +1477,23 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
           const json::Array *gatherIndex = gather->getArray("index");
           if (!gatherRootNumber || !extend || !elementText || !gatherIndex)
             return refuse("the record is incomplete: the gather of " + where);
-          if (*gatherRootNumber != rootOf(load.getMemRef()))
+          if (*gatherRootNumber != rootOf(tableAccess.memref))
             return refuse("the record gathers " + where + " from root " + std::to_string(*gatherRootNumber) +
-                          ", and the nest from root " + std::to_string(rootOf(load.getMemRef())));
+                          ", and the nest from root " + std::to_string(rootOf(tableAccess.memref)));
           if (!tableType || !tableType.hasStaticShape() || !tableType.getLayout().isIdentity() ||
               tableType.getRank() != 1 || gatherIndex->size() != 1)
             return refuse("the nest gathers " + where + " from no one-dimensional memref of static shape");
-          const bool isIndex = load.getType().isIndex();
-          const unsigned width = isIndex ? indexWidth : load.getType().getIntOrFloatBitWidth();
+          const bool isIndex = loadedType.isIndex();
+          const unsigned width = isIndex ? indexWidth : loadedType.getIntOrFloatBitWidth();
           const char *nestExtend = isIndex ? "none" : found->second.zeroExtend ? "zext" : "sext";
           if (*elementText != "bv" + std::to_string(width) || *extend != nestExtend)
             return refuse("the record's gather of " + where + " is " + *extend + " of " + *elementText +
                           ", and the nest's is " + nestExtend + " of bv" + std::to_string(width));
           Form mine;
-          std::optional<Form> theirs = forms.of(load.getIndices()[0]);
+          std::optional<Form> theirs =
+              tableAccess.map ? forms.ofExpr(tableAccess.map.getResult(0), tableAccess.map.getNumDims(),
+                                             tableAccess.operands)
+                              : forms.of(tableAccess.operands[0]);
           if (failed(objectForm((*gatherIndex)[0].getAsObject(), mine)) || !theirs || !(mine == *theirs))
             return refuse("the record's index of the gather of " + where + " is not the nest's");
           if (!overRoles(*theirs, one.coefficient, one.base, problem))
@@ -1491,7 +1501,7 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
           if (!inside(one.coefficient, one.base, tableType.getDimSize(0)))
             return refuse("the gather of " + where + " reads its table out of bounds");
           one.gathered = true;
-          one.table = load.getMemRef();
+          one.table = tableAccess.memref;
           one.zeroExtend = found->second.zeroExtend;
           pack.push_back(one);
         }

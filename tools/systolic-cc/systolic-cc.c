@@ -64,7 +64,15 @@
  * program, in the build's bin/, or on PATH; when none is found, or it fails,
  * the fallback is skipped (a note with --explain) and the compile goes on as
  * without it. --nest-records FILE reads records made beforehand instead of
- * running the tool. --no-generalized-gemm compiles as before the fallback
+ * running the tool. With it, by default, one level of gather is admitted:
+ * the front end takes a read-only one-dimensional integer array as the
+ * leading subscript of an array only read, A[dp[i]][k] (systolic-cfront
+ * --gather-subscripts, with the bound of A written as a literal), and the
+ * tool verifies such nests (--admit-gather). The shim checks at every call
+ * that the entries of dp the nest reads are rows of A, and runs the
+ * function as written otherwise. --no-admit-gather turns that off, and the
+ * fallback is what it was before it.
+ * --no-generalized-gemm compiles as before the fallback
  * existed: no front-end option, no records, the pass without them.
  *
  * The compiler prints only errors, unless --explain (what it offloads and
@@ -253,6 +261,7 @@ typedef struct {
   int no_reduction_batches;     /* --no-reduction-batches */
   int fp_distribute;            /* --fp-distribute */
   int no_generalized;           /* --no-generalized-gemm */
+  int no_admit_gather;          /* --no-admit-gather */
   const char *nest_records;     /* --nest-records FILE */
   const char *nest_report;      /* --nest-report PATH */
   double verify_rtol;
@@ -607,6 +616,10 @@ static char *declarator(const char *ctype, const char *name) {
 }
 
 static const char *c_type(const char *elem) {
+  if (strcmp(elem, "i32") == 0)
+    return "int32_t";
+  if (strcmp(elem, "i64") == 0)
+    return "int64_t";
   return strcmp(elem, "f32") == 0 ? "float" : "double";
 }
 
@@ -815,6 +828,37 @@ static char *shim_source(const function_info *offload, size_t n, int verify,
       if (min && strcmp(json_string(json_get(p, "kind"), ""), "memref") == 0)
         bprintf(&guard, "%s(long long)(%s) < 0LL", guard.n ? " || " : "", min);
     }
+    /* And, for an array read at gathered rows (A[dp[i]][k]), every entry of
+       its table the nest reads is a row in [0, extent): the kernel's view of
+       the array has that extent. A helper before the shim, called with the
+       table: evaluated before any local of the shim, as the rows above. */
+    int gathers = 0;
+    for (size_t i = 0; i < np; ++i) {
+      const json_value *p = json_at(params, i);
+      const char *table = json_string(json_get(p, "gather_table"), NULL);
+      if (!table)
+        continue;
+      const json_value *tp = NULL;
+      for (size_t t = 0; t < np; ++t)
+        if (strcmp(json_string(json_get(json_at(params, t), "name"), ""), table) == 0)
+          tp = json_at(params, t);
+      const char *tc = c_type(json_string(json_get(tp, "elem"), "i32"));
+      int is_signed = json_bool(json_get(tp, "signed"), 1);
+      bprintf(&b, "static int __systolic_cc_rows_%s_%zu(const void *__systolic_cc_t) {\n"
+                  "  for (long long __systolic_cc_e = %lldLL; __systolic_cc_e < %lldLL; "
+                  "++__systolic_cc_e) {\n"
+                  "    %s%s __systolic_cc_v = ((const %s *)__systolic_cc_t)[__systolic_cc_e];\n"
+                  "    if (%s__systolic_cc_v >= %lldLL) return 0;\n"
+                  "  }\n  return 1;\n}\n",
+              offload[f].name, i, json_int(json_get(tp, "leading_min"), 0),
+              json_int(json_get(tp, "leading_extent"), 0),
+              is_signed ? "" : "u", tc + (is_signed ? 0 : 0), tc,
+              is_signed ? "__systolic_cc_v < 0 || " : "",
+              json_int(json_get(p, "gather_extent"), 0));
+      bprintf(&guard, "%s!__systolic_cc_rows_%s_%zu(%s)", guard.n ? " || " : "",
+              offload[f].name, i, table);
+      gathers = 1;
+    }
 
     bprintf(&b, "void %s(%s);\n", symbol, kdecl.n ? kdecl.text : "void");
     bprintf(&b, "void %s%s(%s);\n", name, REFERENCE_SUFFIX, decl_text);
@@ -958,9 +1002,11 @@ static char *shim_source(const function_info *offload, size_t n, int verify,
       if (guard.n)
         bprintf(&b, "  else if (!__systolic_cc_rows_ok)\n"
                     "    fprintf(stderr, \"systolic-cc: %s (%s): ran on the CPU: at "
-                    "these arguments an access reaches a row before the first "
-                    "element of an argument array; nothing to compare\\n\");\n",
-                name, where);
+                    "these arguments an access reaches a row %s; nothing to compare\\n\");\n",
+                name, where,
+                gathers ? "outside an argument array (a gathered row out of range, or "
+                          "before the first element)"
+                        : "before the first element of an argument array");
     }
     for (size_t i = 0; i < np; ++i) {
       const json_value *p = json_at(params, i);
@@ -1109,6 +1155,8 @@ static void add_frontend_flags(strvec *v, const options *a) {
   if (!a->no_generalized) {
     push(v, "--static-extents");
     push(v, "--modulo-subscripts");
+    if (!a->no_admit_gather)
+      push(v, "--gather-subscripts");
   }
 }
 
@@ -1191,6 +1239,8 @@ static const char *nest_records(driver *d, const char *input, size_t roots,
     push(&cmd, "--max-level=1");
     push(&cmd, "--candidates-per-group=1");
     push(&cmd, "--timeout-ms=30000");
+    if (!a->no_admit_gather)
+      push(&cmd, "--admit-gather");
     result r;
     if (run(d, &cmd, "generalized-gemm-nest-report", NULL, NULL, &r) != 0) {
       log_note("note: no Generalized GEMM records of '%s': %s",
@@ -1540,7 +1590,10 @@ static int compile(driver *d) {
           continue;
         if (json_int(json_get(pp, "leading_min"), 0) < 0)
           reads_before = 1;
-        if (strcmp(json_string(json_get(pp, "elem"), ""), "f32") != 0)
+        /* An index table (A[dp[i]][k]) holds integers and is no operand of
+           the datapath. */
+        if (strcmp(json_string(json_get(pp, "elem"), ""), "f32") != 0 &&
+            !json_bool(json_get(pp, "index_table"), 0))
           uses_double = 1;
       }
       char *why = NULL;
@@ -1770,7 +1823,7 @@ static void usage(void) {
           "[--keep-dir DIR] [--explain] [--fp-reassociation] "
           "[--no-reduction-batches] [--fp-distribute] "
           "[--no-generalized-gemm] [--nest-records FILE] [--nest-report PATH] "
-          "[-DNAME[=VAL]] "
+          "[--no-admit-gather] [-DNAME[=VAL]] "
           "[-IDIR] [-std=STD] "
           "[-ON] FILE.c "
           "-o PROGRAM\n");
@@ -1867,6 +1920,10 @@ int main(int argc, char **argv) {
       a.no_generalized = 0;   /* the default */
     } else if (strcmp(s, "--no-generalized-gemm") == 0) {
       a.no_generalized = 1;
+    } else if (strcmp(s, "--admit-gather") == 0) {
+      a.no_admit_gather = 0;   /* the default */
+    } else if (strcmp(s, "--no-admit-gather") == 0) {
+      a.no_admit_gather = 1;
     } else if ((v = option_value(s, "--nest-records", &i, argc, argv))) {
       a.nest_records = v;
     } else if ((v = option_value(s, "--nest-report", &i, argc, argv))) {

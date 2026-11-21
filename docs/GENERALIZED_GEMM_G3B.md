@@ -376,6 +376,37 @@ every one of their 128 cells bit for bit, in 5 invocations, as the remarks annou
 run: the fuzz program suites, the mutation harness, the FPGA board, and any Triton
 codegen.
 
+**From C, by default (2026-11-21).** systolic-cc's Generalized GEMM fallback now takes
+gathers by default. `--no-admit-gather` turns them off, and the fallback is then what it
+was before.
+
+- The front end (`systolic-cfront --gather-subscripts`, given with `--static-extents`)
+  translates `C[i][j] += A[dp[i]][k] * B[k][j]`. The table is a one-dimensional integer
+  array parameter: `int`, `unsigned`, `long`, `int32_t`, and so on. It becomes
+  `affine.load dp[i]`, then `arith.index_cast` (`index_castui` for an unsigned element),
+  then `memref.load A[row, k]`. A's leading extent is the bound written as an integer
+  literal (`float A[restrict 32][12]`).
+- The front end refuses each of these, and the function stays C on the host:
+  - no literal bound on A;
+  - a gather in an array that is written (`C[dp[i]][j]`: the stores stay affine);
+  - a second level (`A[dp[dp[i]]]`);
+  - a parameter or a `%` beside the gather;
+  - a nest whose bounds read another counter;
+  - a table read as anything but such a subscript.
+- The interface names the table (`gather_table`, `gather_extent`; `index_table`, `signed`).
+- systolic-cc passes `--admit-gather` to `generalized-gemm-nest-report`, and does not count
+  an integer table as a non-fp32 operand.
+- At every call, before it offloads, the shim checks that each entry of dp the nest reads
+  is a row in `[0, extent)`. Otherwise the call runs the function as written, on the CPU.
+  C does not enforce the bound written, so a dp that reaches past it into a larger
+  caller's array stays correct.
+- `test/SystolicCC/generalized_gather.c` checks, bit for bit:
+  - a dp that repeats rows: 5 tile invocations, and FPGA Executed with the mock hardware;
+  - a dp past the bound: the shim's check sends the call to the CPU;
+  - `--no-admit-gather`: the function stays on the host.
+- Defaults unchanged elsewhere: `check-systolic` passes 224/224. The records systolic-cc
+  writes for `generalized_fallback.c` are identical with `--admit-gather`.
+
 **Limits.** One level, a one-dimensional dp of static shape, read-only for the whole
 nest, and no gather into C (a scatter would need Injective(dp) for C1). The bounds of
 `A[dp[i]]` are the program's own: the lowering reads the same addresses as the nest.

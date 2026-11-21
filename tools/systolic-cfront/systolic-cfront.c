@@ -6,7 +6,8 @@
  *                   [-std=STD] [--function NAME] [--skip-unsupported]
  *                   [--symbol-suffix S] [--interface FILE.json]
  *                   [--fp-reassociation] [--static-extents]
- *                   [--modulo-subscripts] FILE.c [-o OUT.mlir]
+ *                   [--modulo-subscripts] [--gather-subscripts]
+ *                   FILE.c [-o OUT.mlir]
  *
  * --static-extents (systolic-cc's Generalized GEMM fallback,
  * docs/GENERALIZED_GEMM_SCOPE.md "The fallback in systolic-cc"): an array
@@ -27,6 +28,23 @@
  * becomes the affine expression (E) mod C; its range is computed by running
  * the nest's counters (up to the enumeration limit below). The GEMM lowering
  * finds no GEMM in such a nest; systolic-cc's Generalized GEMM fallback may.
+ *
+ * --gather-subscripts (with --static-extents; systolic-cc's Generalized GEMM
+ * fallback): the leading subscript of an array that is only read may also
+ * be T[E], T a one-dimensional integer array parameter (int, unsigned, long,
+ * int32_t, ...) read nowhere else and never written, E an affine subscript
+ * of the loop counters -- A[dp[i]][k], dp a MoE token index or a BSR column
+ * index. It becomes affine.load T[E], arith.index_cast (index_castui when
+ * T's element is unsigned), and a memref.load of the array at that row and
+ * its other subscripts (each an affine form of the counters, no parameter,
+ * no %%). The array's leading extent is then the bound written as an
+ * integer literal (float A[32][12], A[restrict 32][12]); without one the
+ * function is outside the subset. The interface says which table gathers
+ * the array (gather_table): systolic-cc's shim checks, at every call, that
+ * the table's entries the nest reads are rows in [0, extent) before it
+ * offloads, and runs the function as written otherwise. One level only
+ * (T[T[i]] is refused), never in an array that is written (C's stores stay
+ * affine), and a table read as anything but such a subscript is refused.
  *
  * --fp-reassociation marks every floating-point arith.addf / subf / mulf
  * `fastmath<reassoc>`: the program permits reassociating floating-point sums,
@@ -538,6 +556,11 @@ typedef struct {
   char *dynamic_type;          /* --static-extents: memref<?x...> */
   int declared_bound;          /* --static-extents: written with a leading
                                   bound, float A[64][16] / A[M][K] */
+  long long declared_extent;   /* --gather-subscripts: that bound when it is
+                                  an integer literal, else -1 */
+  int index_table;             /* --gather-subscripts: a one-dimensional
+                                  integer array, read only as T[E] in a
+                                  leading subscript */
   int inner_dims[MAX_RANK];
   /* ENV_SCALAR */
   /* (elem above) */
@@ -589,6 +612,12 @@ typedef struct {
      size the array it snapshots), lo_expr / hi_expr, or NULL while every
      range is static. */
   char *lo_expr, *hi_expr;
+  /* --gather-subscripts: the leading subscript is T[E] in some access; the
+     table's C name and its declarator's id, and the leading extent (the
+     literal bound written). The leading dimension then has no range. */
+  int gathered;
+  const char *gather_table, *gather_table_decl;
+  long long gather_extent;
 } access_info;
 
 typedef struct {
@@ -601,6 +630,17 @@ typedef struct {
   int fp_reassociation;        /* --fp-reassociation: fastmath<reassoc> */
   int static_extents;          /* --static-extents */
   int modulo_subscripts;       /* --modulo-subscripts */
+  int gather_subscripts;       /* --gather-subscripts */
+  int in_gather;               /* translating the T[E] of a gather */
+  /* Set by array_access for the access it just read when its leading
+     subscript is a gather, for load() to emit; cleared by load(). */
+  struct {
+    int active;
+    env_entry *table;
+    char *table_index;           /* E, affine text */
+    int count;                   /* the array's rank */
+    linear_form forms[MAX_RANK]; /* the other subscripts' forms (d >= 1) */
+  } gather;
 
   env_entry *env;
   size_t env_n, env_cap;
@@ -1717,15 +1757,56 @@ static env_entry *array_access(translator *tr, const json_value *node,
   if ((int)count != e->rank)
     unsupported(node, "'%s' has %d dimensions but is subscripted %zu times",
                 referenced_name(base), e->rank, count);
+  if (e->index_table && (written || !tr->in_gather))
+    unsupported(node, "the integer array '%s' is read only as the leading "
+                      "subscript of another array's read (A[%s[i]][k])",
+                referenced_name(base), referenced_name(base));
 
   char *texts[MAX_RANK];
   linear_form forms[MAX_RANK];
   /* --modulo-subscripts: a subscript E % C is E's form, its node E, and C */
   long long mods[MAX_RANK] = {0};
   const json_value *operands[MAX_RANK];
+  /* --gather-subscripts: the leading subscript is T[E] (gather_table_of) */
+  int gathered = 0;
+  env_entry *table = NULL;
+  char *table_index = NULL;
   tr->in_subscript = 1;   /* a signed integer parameter is a symbol here */
   for (size_t d = 0; d < count; ++d) {   /* outermost subscript first */
     const json_value *ix = indices[count - 1 - d];
+    if (d == 0 && tr->gather_subscripts && !tr->in_gather) {
+      const json_value *t = strip_parens_and_casts(ix, kIndexCasts);
+      const json_value *tbase = NULL;
+      if (strcmp(kind_of(t), "ArraySubscriptExpr") == 0)
+        tbase = strip_parens_and_casts(
+            strip_parens_and_casts(child(t, 0), kDecayNoOp), kLoadNoOp);
+      env_entry *te = tbase && strcmp(kind_of(tbase), "DeclRefExpr") == 0
+                          ? env_find(tr, referenced_id(tbase)) : NULL;
+      if (te && te->kind == ENV_MEMREF && te->index_table) {
+        if (written)
+          unsupported(ix, "a gathered subscript in an array that is written; "
+                          "the stores stay affine");
+        if (!tr->static_extents || e->declared_extent <= 0)
+          unsupported(node, "'%s' is read at a gathered row, and its leading "
+                            "bound is not written as an integer literal "
+                            "(float %s[32][...])",
+                      referenced_name(base), referenced_name(base));
+        if (env_has_nonbox(tr))
+          unsupported(ix, "a gathered subscript in a nest whose bounds read "
+                          "the enclosing counters");
+        /* T[E]: an access of its own, one level (no gather inside). */
+        tr->in_subscript = 0;
+        tr->in_gather = 1;
+        table = array_access(tr, t, 1, 0, &table_index);
+        tr->in_gather = 0;
+        tr->in_subscript = 1;
+        gathered = 1;
+        memset(&forms[0], 0, sizeof forms[0]);
+        operands[0] = NULL;
+        texts[0] = xstrdup("@@gather@@");
+        continue;
+      }
+    }
     const json_value *e_node =
         tr->modulo_subscripts ? modulo_operand(ix, &mods[d]) : NULL;
     operands[d] = e_node ? e_node : ix;
@@ -1748,6 +1829,17 @@ static env_entry *array_access(translator *tr, const json_value *node,
      value -- the ranges of those nodes are computed with the subscripts'. */
   header_nodes sub = {0};
   for (size_t d = 0; d < count; ++d) {
+    if (gathered && d == 0)
+      continue;
+    if (gathered && (mods[d] || form_has_symbol(tr, &forms[d])))
+      unsupported(operands[d], "a subscript beside a gathered one reads a "
+                               "parameter or takes a remainder");
+    for (size_t f = 0; gathered && f < forms[d].n; ++f) {
+      env_entry *iv = env_find(tr, forms[d].ids[f]);
+      if (iv && iv->shift.n)
+        unsupported(operands[d], "a subscript beside a gathered one reads a "
+                                 "counter whose bounds read another");
+    }
     long long a_unused;
     linear_form f_unused;
     int r_unused;
@@ -1817,8 +1909,25 @@ static env_entry *array_access(translator *tr, const json_value *node,
   access_info *info = access_of(tr, e->decl, e->rank);
   info->read |= read;
   info->written |= written;
+  if (gathered) {
+    /* No row range: the rows are the table's entries, checked by the shim
+       at every call against the literal bound, the leading extent. */
+    if (info->gathered && strcmp(info->gather_table_decl, table->decl) != 0)
+      unsupported(node, "'%s' is gathered by two tables",
+                  referenced_name(base));
+    info->gathered = 1;
+    info->gather_table_decl = table->decl;
+    info->gather_table = table->cname;
+    info->gather_extent = e->declared_extent;
+    tr->gather.active = 1;
+    tr->gather.table = table;
+    tr->gather.table_index = table_index;
+    tr->gather.count = (int)count;
+    for (size_t d = 0; d < count; ++d)
+      tr->gather.forms[d] = forms[d];
+  }
   long long lo[MAX_RANK], hi[MAX_RANK];
-  int all = reached;
+  int all = reached && !gathered;
   for (size_t d = 0; d < count; ++d) {
     all = all && found[d];
     if (found[d]) {
@@ -1935,9 +2044,54 @@ static char *load(translator *tr, const json_value *node, int indent,
                   const char **elem) {
   char *idx;
   env_entry *e = array_access(tr, node, 1, 0, &idx);
+  if (!tr->gather.active) {
+    char *name = fresh(tr);
+    emit(tr, indent, "%s = affine.load %s[%s] : %s %s", name, e->name, idx,
+         e->type, loc_text(tr, node));
+    *elem = e->elem;
+    return name;
+  }
+  /* --gather-subscripts: row = T[E] as an index, the other subscripts as
+     index values (a counter as it is, else affine.apply over the counters),
+     and a memref.load: a loaded value is no affine dimension. */
+  tr->gather.active = 0;
+  env_entry *t = tr->gather.table;
+  char *raw = fresh(tr);
+  emit(tr, indent, "%s = affine.load %s[%s] : %s %s", raw, t->name,
+       tr->gather.table_index, t->type, loc_text(tr, node));
+  char *row = fresh(tr);
+  emit(tr, indent, "%s = arith.index_cast%s %s : %s to index %s", row,
+       t->is_signed ? "" : "ui", raw, t->elem, loc_text(tr, node));
+  char *list = xstrdup(row);
+  for (int d = 1; d < tr->gather.count; ++d) {
+    const linear_form *f = &tr->gather.forms[d];
+    char *v = NULL;
+    if (f->n == 1 && f->coef[0] == 1 && f->constant == 0) {
+      env_entry *iv = env_find(tr, f->ids[0]);
+      if (iv && iv->kind == ENV_IV && !iv->descending)
+        v = xstrdup(iv->name);
+    }
+    if (!v) {
+      char *b = bound_text(tr, f, node);
+      v = fresh(tr);
+      if (strncmp(b, "affine_map", 10) == 0)
+        emit(tr, indent, "%s = affine.apply %s %s", v, b, loc_text(tr, node));
+      else
+        emit(tr, indent, "%s = arith.constant %s : index %s", v, b,
+             loc_text(tr, node));
+      free(b);
+    }
+    char *joined = format("%s, %s", list, v);
+    free(list);
+    free(v);
+    list = joined;
+  }
   char *name = fresh(tr);
-  emit(tr, indent, "%s = affine.load %s[%s] : %s %s", name, e->name, idx,
+  emit(tr, indent, "%s = memref.load %s[%s] : %s %s", name, e->name, list,
        e->type, loc_text(tr, node));
+  free(list);
+  free(tr->gather.table_index);
+  tr->gather.table_index = NULL;
   *elem = e->elem;
   return name;
 }
@@ -3099,6 +3253,52 @@ static int has_declared_bound(translator *tr, const json_value *p,
   return s < end && *s != ']' && *s != '*';
 }
 
+/* --gather-subscripts: the leading bound written in the parameter's
+   declarator when it is an integer literal -- float A[32][12],
+   A[restrict 32][12], A[static 32][12] -- else -1 (a macro, an expression,
+   none). Read from the source text as has_declared_bound reads it. */
+static long long declared_literal_bound(translator *tr, const json_value *p,
+                                        const char *pname) {
+  if (!has_declared_bound(tr, p, pname))
+    return -1;
+  const json_value *loc = json_get(p, "loc");
+  long long off = json_int(json_get(loc, "offset"), -1);
+  const char *s = tr->sm->text + off + strlen(pname);
+  const char *end = tr->sm->text + tr->sm->length;
+  while (s < end && *s != '[')
+    ++s;
+  ++s;
+  static const char *const quals[] = {"restrict", "__restrict", "__restrict__",
+                                      "const", "volatile", "static"};
+  for (;;) {
+    while (s < end && isspace((unsigned char)*s))
+      ++s;
+    int skipped = 0;
+    for (size_t q = 0; q < sizeof quals / sizeof *quals; ++q) {
+      size_t n = strlen(quals[q]);
+      if ((size_t)(end - s) > n && strncmp(s, quals[q], n) == 0 &&
+          !isalnum((unsigned char)s[n]) && s[n] != '_') {
+        s += n;
+        skipped = 1;
+        break;
+      }
+    }
+    if (!skipped)
+      break;
+  }
+  long long v = 0;
+  int digits = 0;
+  while (s < end && isdigit((unsigned char)*s)) {
+    if (v > (LLONG_MAX - 9) / 10)
+      return -1;
+    v = 10 * v + (*s++ - '0');
+    ++digits;
+  }
+  while (s < end && isspace((unsigned char)*s))
+    ++s;
+  return digits && v > 0 && s < end && *s == ']' ? v : -1;
+}
+
 static char *parameter(translator *tr, const json_value *p) {
   char *t = strip_qualifiers(qual_type(p));
   const char *pname = json_string(json_get(p, "name"), "");
@@ -3161,6 +3361,35 @@ static char *parameter(translator *tr, const json_value *p) {
     if (matched)
       elem = float_type(base);
   }
+  /* --gather-subscripts: a one-dimensional integer array, int *T,
+     const int T[restrict 16], read only as the T[E] of a gather. */
+  int index_table = 0, table_signed = 0;
+  if (!elem && tr->gather_subscripts) {
+    static const struct {
+      const char *name;
+      int bits, is_signed;
+    } kTables[] = {{"int", 32, 1},           {"unsigned int", 32, 0},
+                   {"int32_t", 32, 1},       {"uint32_t", 32, 0},
+                   {"long", 64, 1},          {"long long", 64, 1},
+                   {"unsigned long", 64, 0}, {"unsigned long long", 64, 0},
+                   {"int64_t", 64, 1},       {"uint64_t", 64, 0}};
+    for (size_t k = 0; k < sizeof kTables / sizeof *kTables && !elem; ++k) {
+      size_t n = strlen(kTables[k].name);
+      if (strncmp(t, kTables[k].name, n) != 0 || t[n] != ' ' || t[n + 1] != '*')
+        continue;
+      const char *r = t + n + 2;
+      while (*r == ' ' || *r == '\t')
+        ++r;
+      int na = strcmp(r, "__restrict") == 0 || strcmp(r, "restrict") == 0;
+      if (!na && *r != 0)
+        continue;
+      noalias = na;
+      rank = 1;
+      elem = kTables[k].bits == 32 ? "i32" : "i64";
+      index_table = 1;
+      table_signed = kTables[k].is_signed;
+    }
+  }
   if (!elem) {
     const char *ft = float_type(t);
     if (ft) {
@@ -3205,11 +3434,17 @@ static char *parameter(translator *tr, const json_value *p) {
   e->type = xstrdup(type);
   for (int d = 0; d < rank - 1; ++d)
     e->inner_dims[d] = dims[d];
+  e->index_table = index_table;
+  e->is_signed = table_signed;
+  e->cname = xstrdup(pname);
+  e->declared_extent = -1;
   if (tr->static_extents) {
     /* The type is known once the accesses are (static_extent_types). */
     e->dynamic_type = e->type;
     e->type = format("@@systolic-cfront-param-%zu@@", tr->env_n - 1);
     e->declared_bound = has_declared_bound(tr, p, pname);
+    if (tr->gather_subscripts)
+      e->declared_extent = declared_literal_bound(tr, p, pname);
   }
   return format("%s: %s%s %s", name, e->type, noalias ? " {llvm.noalias}" : "",
                 loc_text(tr, p));
@@ -3294,10 +3529,26 @@ static void interface(translator *tr, const json_value *fn,
       /* Rows [0, extent): the open leading dimension is as long as the
          accesses reach (0: never accessed). */
       int ranges = info && info->has_ranges;
+      long long extent = ranges ? info->hi[0] + 1 : 0;
+      long long minimum = ranges ? info->lo[0] : 0;
+      if (info && info->gathered) {
+        /* The rows a gather reads are checked by the shim against this. */
+        if (extent < info->gather_extent)
+          extent = info->gather_extent;
+        if (minimum > 0)
+          minimum = 0;
+      }
       fprintf(out, ", \"elem\": \"%s\", \"leading_extent\": %lld, "
                    "\"leading_min\": %lld",
-              e->elem, ranges ? info->hi[0] + 1 : 0,
-              ranges ? info->lo[0] : 0);
+              e->elem, extent, minimum);
+      if (info && info->gathered) {
+        fprintf(out, ", \"gather_table\": ");
+        json_escape(out, info->gather_table);
+        fprintf(out, ", \"gather_extent\": %lld", info->gather_extent);
+      }
+      if (e->index_table)
+        fprintf(out, ", \"index_table\": true, \"signed\": %s",
+                e->is_signed ? "true" : "false");
       /* Subscripts in parameters: the leading extent and minimum as C
          expressions of the parameters, exact at run time. */
       if (ranges && info->hi_expr) {
@@ -3361,7 +3612,21 @@ static void static_extent_types(translator *tr, size_t first_line) {
       if (strcmp(tr->accesses[a].decl, e->decl) == 0)
         info = &tr->accesses[a];
     char *type;
-    if (e->declared_bound && info && info->has_ranges && !info->hi_expr &&
+    if (info && info->gathered) {
+      /* The literal bound written; any affine access must stay inside it. */
+      long long ext = info->gather_extent;
+      if (!info->has_ranges ||
+          (!info->hi_expr && info->lo[0] >= 0 && info->hi[0] < ext)) {
+        char buf[256];
+        int o = snprintf(buf, sizeof buf, "memref<%lld", ext);
+        for (int d = 0; d < e->rank - 1; ++d)
+          o += snprintf(buf + o, sizeof buf - (size_t)o, "x%d", e->inner_dims[d]);
+        snprintf(buf + o, sizeof buf - (size_t)o, "x%s>", e->elem);
+        type = xstrdup(buf);
+      } else {
+        type = xstrdup(e->dynamic_type);
+      }
+    } else if (e->declared_bound && info && info->has_ranges && !info->hi_expr &&
         info->lo[0] >= 0 && info->hi[0] < LLONG_MAX) {
       char buf[256];
       int o = snprintf(buf, sizeof buf, "memref<%lld", info->hi[0] + 1);
@@ -3425,6 +3690,8 @@ static void function(translator *tr, const json_value *fn) {
      flag set (array_access clears it on its normal exit only): every function
      starts outside a subscript, where an integer parameter is no symbol. */
   tr->in_subscript = 0;
+  tr->in_gather = 0;
+  tr->gather.active = 0;
   char *args = xstrdup("");
   for (size_t i = 0; i < nparams; ++i) {
     if (!json_get(params[i], "name"))
@@ -4104,7 +4371,7 @@ static void usage(void) {
           "[-DNAME[=VAL]] [-IDIR] [-std=STD] [--function NAME] "
           "[--skip-unsupported] [--symbol-suffix S] [--interface FILE] "
           "[--gemm-sites FILE] [--fp-reassociation] [--static-extents] "
-          "[--modulo-subscripts] FILE.c [-o OUT.mlir]\n");
+          "[--modulo-subscripts] [--gather-subscripts] FILE.c [-o OUT.mlir]\n");
 }
 
 /* --opt=value or --opt value. */
@@ -4131,7 +4398,7 @@ int main(int argc, char **argv) {
   const char *sites_path = NULL;
   long clang_major = 24;
   int skip_unsupported = 0, fp_reassociation = 0;
-  int static_extents = 0, modulo_subscripts = 0;
+  int static_extents = 0, modulo_subscripts = 0, gather_subscripts = 0;
   strvec defines = {0}, includes = {0}, only = {0};
 
   for (int i = 1; i < argc; ++i) {
@@ -4159,6 +4426,8 @@ int main(int argc, char **argv) {
       static_extents = 1;
     } else if (strcmp(a, "--modulo-subscripts") == 0) {
       modulo_subscripts = 1;
+    } else if (strcmp(a, "--gather-subscripts") == 0) {
+      gather_subscripts = 1;
     } else if ((v = option_value(a, "--output", &i, argc, argv))) {
       output = v;
     } else if (strcmp(a, "-o") == 0) {
@@ -4367,6 +4636,7 @@ int main(int argc, char **argv) {
   tr.fp_reassociation = fp_reassociation;
   tr.static_extents = static_extents;
   tr.modulo_subscripts = modulo_subscripts;
+  tr.gather_subscripts = gather_subscripts;
   emit(&tr, 0, "// Generated by systolic-cfront from %s.", display);
   char *defs = xstrdup("");
   for (size_t i = 0; i < defines.n; ++i) {

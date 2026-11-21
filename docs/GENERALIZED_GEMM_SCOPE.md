@@ -1280,6 +1280,11 @@ another file, add to `RULES` in the script.
 
 ### The fallback in systolic-cc (built 2026-11-20)
 
+Since 2026-11-21 the fallback also takes one-level gathers by default, `A[dp[i]][k]` with
+dp a read-only integer array (`systolic-cfront --gather-subscripts`, the tool's
+`--admit-gather`, a check of dp's entries in the shim). `--no-admit-gather` turns them off.
+See docs/GENERALIZED_GEMM_G3B.md, "Experimental: one-level gathers".
+
 `systolic-cc` now tries the Generalized GEMM after its own GEMM lowering, nest by nest, by
 default: a nest goes to the FPGA by the standard path when that path takes it, else from its
 record when the research verifies it and the record-driven lowering takes it, else it stays on
