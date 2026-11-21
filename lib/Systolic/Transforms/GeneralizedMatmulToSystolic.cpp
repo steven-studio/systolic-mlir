@@ -120,6 +120,32 @@ struct RecordsMode : GeneralizedMatmulOptions {
                         one.modScale, one.modulus, one.modBase, one.modCoefficient});
       return materializeGatherPack(builder, loc, g.operands[x].memref, pack, shapeOf[x], elementType);
     };
+    if (g.scatter && g.scatterSource.products) {
+      // exp/k-scatter: C's address reads K. Every target of (i, j, k) checked at run time;
+      // when all are inside, A and B packed, every product by a K = 1 GEMM per k (the plan of
+      // M x N x 1), and the products added into C through the two-layer inverse map, bucketed
+      // by cell; otherwise the nest as written.
+      const RecordDrivenGemm::ScatterSource &src = g.scatterSource;
+      std::optional<SystolicTilePlan> productPlan;
+      size_t productRegions = 0;
+      if (failed(planMatmulTiles(anchor, M, N, 1, fleet, sharedReadBytesPerCycle, costModel, operandPath,
+                                 productPlan, productRegions, why, hardError)))
+        return failure();
+      ScatterRegions scatterRegions =
+          beginScatter(builder, loc, src.slice, src.store, src.counterI, src.lowerI, src.counterJ, src.lowerJ, C,
+                       {M, N}, src.counterK, src.lowerK, K);
+      Value aTensor = asTensor(packed(0), shapeOf[0], /*writable=*/false);
+      Value bTensor = asTensor(packed(1), shapeOf[1], /*writable=*/false);
+      Value products = materializeProductMatrices(builder, loc, aTensor, bTensor, M, N, K, productPlan, fleet,
+                                                  nextGemmIndex, elementType);
+      scatterAddByInverseMap(builder, loc, products, scatterRegions.targets, C);
+      anchor->moveBefore(scatterRegions.elseBlock->getTerminator());
+      if (report)
+        anchor->getParentOp()->emitRemark()
+            << "GEMM " << M << "x" << N << "x" << K << " of " << g.where << " lowered from its record as "
+            << productRegions * K << " exact region(s) (" << g.summary << ")";
+      return success();
+    }
     if (g.scatter) {
       // exp/general-scatter, Track B: every target checked at run time; when all are inside,
       // A and B packed, the tiles into a zeroed matrix, and its cells added into C through

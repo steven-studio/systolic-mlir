@@ -336,6 +336,7 @@ NestRecord analyzeNest(const OutlinedNest &nest, const NestAnalysisOptions &opti
   request.domain.computation.replay.maxNodes = options.replayNodes;
   request.proposal.maxBox = options.maxBox;
   request.maxCandidates = options.candidatesPerGroup;
+  request.pointwiseFallback = options.admitGather;
   request.closedForms.scope = scope;
   request.closedForms.solver = termination.limits.solver;
   request.closedForms.referenceFill = options.referenceFill;
@@ -454,15 +455,25 @@ NestRecord analyzeNest(const OutlinedNest &nest, const NestAnalysisOptions &opti
     return r;
   }
 
-  // The first candidate verified over the scope, in the search's order, or the first.
+  // The first candidate verified over the scope with a symbolic logical tier, in the
+  // search's order; else the first verified over the scope; else the first. (With one
+  // candidate, as the drivers ask for, the first: exp/k-scatter's pointwise candidate is
+  // the only way a second one comes, and it comes only when the first is not logical.)
   unsigned chosen = 0;
-  for (unsigned c = 0; c < groupDomain.candidates.size(); ++c) {
-    const ReductionVerdict &v = groupDomain.candidates[c].verdict;
-    if (v.status() == ComputationStatus::Verified && v.tier() == ComputationTier::Symbolic) {
-      chosen = c;
-      break;
+  bool found = false;
+  for (int pass = 0; pass < 3 && !found; ++pass)
+    for (unsigned c = 0; c < groupDomain.candidates.size() && !found; ++c) {
+      const ReductionVerdict &v = groupDomain.candidates[c].verdict;
+      const bool logical = v.logicalTier() == ComputationTier::Symbolic;
+      const bool domain = v.domainSymbolic().status() == ComputationStatus::Verified &&
+                          v.domainSymbolic().exactOrder() &&
+                          v.domainSymbolic().multiplicity() == DomainMultiplicity::Unit;
+      if (v.status() == ComputationStatus::Verified && v.tier() == ComputationTier::Symbolic &&
+          (pass == 0 ? logical : pass == 1 ? domain : true)) {
+        chosen = c;
+        found = true;
+      }
     }
-  }
   r.candidate = chosen;
   const CandidateDomain &candidate = groupDomain.candidates[chosen];
   const ReductionVerdict &v = candidate.verdict;

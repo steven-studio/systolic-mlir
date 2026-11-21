@@ -17,6 +17,7 @@
 #include "mlir/Interfaces/LoopLikeInterface.h"
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/bit.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/CheckedArithmetic.h"
@@ -977,8 +978,9 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
   // ---------------------------------------------------------------------------------
   const json::Array *levels = fields.array(gemm, "levels", "gemm");
   const json::Object *axes = fields.object(gemm, "axes", "gemm");
-  const json::Object *extents = fields.object(gemm, "extents", "gemm");
-  if (!levels || !axes || !extents)
+  // A pointwise record (exp/k-scatter) has no extents: its family has no I, J and K.
+  const json::Object *extents = at.pointwise ? nullptr : fields.object(gemm, "extents", "gemm");
+  if (!levels || !axes || (!extents && !at.pointwise))
     return refuse("");
   if (levels->size() != 3)
     return refuse("the record has " + std::to_string(levels->size()) + " levels, and the band 3 loops");
@@ -992,6 +994,24 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
   std::array<int64_t, 3> shift{0, 0, 0};    // per band position: the record's level minus the counter
   std::array<unsigned, 3> levelOf{};        // per axis: the band position
   std::array<bool, 3> seen{false, false, false};
+  if (at.pointwise) {
+    // exp/k-scatter: a pointwise family's levels are the band's loops, each P; which loop is
+    // I, J and K is read off the nest's accesses below.
+    for (unsigned l = 0; l < 3; ++l) {
+      const json::Object *level = (*levels)[l].getAsObject();
+      std::optional<StringRef> axis = level ? level->getString("axis") : std::nullopt;
+      std::optional<bool> descending = level ? level->getBoolean("descending") : std::nullopt;
+      std::optional<int64_t> lo = level ? level->getInteger("lower") : std::nullopt;
+      std::optional<int64_t> hi = level ? level->getInteger("upper") : std::nullopt;
+      if (!axis || *axis != "P" || !descending || *descending || !lo || !hi || *lo != band[l].lower ||
+          *hi != band[l].upper || *hi <= *lo)
+        return refuse("level " + std::to_string(l) + " of the pointwise record is not loop " + std::to_string(l) +
+                      " of the nest");
+      levelOf[l] = l;
+      lower[l] = band[l].lower;
+      extent[l] = band[l].upper - band[l].lower;
+    }
+  } else {
   for (unsigned l = 0; l < 3; ++l) {
     const json::Object *level = (*levels)[l].getAsObject();
     if (!level)
@@ -1036,6 +1056,7 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
     if (*e != extent[a])
       return refuse(std::string("the record's ") + extentName[a] + " is " + std::to_string(*e) + " and the loop of " +
                     kAxisName[a] + " runs " + std::to_string(extent[a]) + " times");
+  }
   }
 
   // ---------------------------------------------------------------------------------
@@ -1264,6 +1285,43 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
         type[x].getElementType() != element)
       return refuse(std::string(kOperandName[x]) +
                     " is no memref of static shape and the identity layout over the update's element type");
+  }
+
+  // exp/k-scatter: with a pointwise record, I, J and K from the nest: K the one loop A and B
+  // both read, I the other loop of A, J the other loop of B.
+  if (at.pointwise) {
+    Forms forms(counters, carriedForms);
+    auto loopsRead = [&](const Access &a, unsigned &mask) -> bool {
+      mask = 0;
+      SmallVector<std::optional<Form>, 3> f;
+      if (a.map) {
+        for (AffineExpr expr : a.map.getResults())
+          f.push_back(forms.ofExpr(expr, a.map.getNumDims(), a.operands));
+      } else {
+        for (Value v : a.operands)
+          f.push_back(forms.of(v));
+      }
+      for (const std::optional<Form> &one : f) {
+        if (!one)
+          return false;
+        for (unsigned p = 0; p < 3; ++p)
+          if (one->coefficient[p] != 0)
+            mask |= 1u << p;
+      }
+      return true;
+    };
+    unsigned mA = 0, mB = 0;
+    if (!loopsRead(access[0], mA) || !loopsRead(access[1], mB))
+      return refuse("with a pointwise record, A and B must be read at affine forms of the loops");
+    const unsigned common = mA & mB, onlyA = mA & ~common, onlyB = mB & ~common;
+    if (llvm::popcount(common) != 1 || llvm::popcount(onlyA) != 1 || llvm::popcount(onlyB) != 1)
+      return refuse("with a pointwise record, A must read two loops, B two, and one of them both");
+    levelOf = {(unsigned)llvm::countr_zero(onlyA), (unsigned)llvm::countr_zero(onlyB),
+               (unsigned)llvm::countr_zero(common)};
+    for (unsigned a = 0; a < 3; ++a) {
+      lower[a] = band[levelOf[a]].lower;
+      extent[a] = band[levelOf[a]].upper - band[levelOf[a]].lower;
+    }
   }
 
   // Experimental: the roots the nest gathers from (dp). Neither A, B nor C.
@@ -1873,6 +1931,8 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
       while (!work.empty()) {
         Value v = work.pop_back_val();
         if (auto arg = dyn_cast<BlockArgument>(v)) {
+          if (at.pointwise && v == counters[levelOf[2]])
+            continue; // exp/k-scatter: C's address may read K too
           if (anchorOp->isAncestor(arg.getOwner()->getParentOp()) && v != counters[levelOf[0]] &&
               v != counters[levelOf[1]]) {
             whyB = "C's address reads the loop of K or a value a loop carries";
@@ -1914,7 +1974,8 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
       return true;
     };
     const bool sliceRead = sliceOk();
-    const bool needScatter = at.outputMayCollide || at.outputGathered || (sliceRead && readsTable);
+    const bool needScatter =
+        at.pointwise || at.outputMayCollide || at.outputGathered || (sliceRead && readsTable);
     if (!needScatter && trackA())
       return out;
     if (needScatter) {
@@ -1946,7 +2007,14 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
       out.scatterSource.counterJ = counters[levelOf[1]];
       out.scatterSource.lowerI = lower[0];
       out.scatterSource.lowerJ = lower[1];
-      out.summary = std::string("scatter-add: C's address re-emitted at run time") +
+      if (at.pointwise) {
+        out.scatterSource.products = true;
+        out.scatterSource.counterK = counters[levelOf[2]];
+        out.scatterSource.lowerK = lower[2];
+      }
+      out.summary = std::string(at.pointwise ? "product scatter-add: every product A[i][k] * B[k][j] by a K = 1 "
+                                               "GEMM per k, C's address of (i, j, k) re-emitted at run time"
+                                             : "scatter-add: C's address re-emitted at run time") +
                     (readsTable ? " through read-only tables" : "") +
                     (at.outputMayCollide ? ", with collisions" : "") +
                     ", every index checked before a write, a two-layer inverse map (bucket offsets, "

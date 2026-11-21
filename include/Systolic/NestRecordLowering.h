@@ -150,6 +150,12 @@ struct RecordDrivenGemm {
     llvm::SmallVector<Operation *> slice; // the nest's operations computing them, in order
     Value counterI, counterJ;            // the band's counters of I and J
     int64_t lowerI = 0, lowerJ = 0;      // their lower bounds
+    /// exp/k-scatter: C's address reads K too (a pointwise record). The tiles then compute
+    /// every product A[i][k] * B[k][j] once, a K = 1 GEMM per k into products[k], and the
+    /// two-layer inverse map buckets the (k, i, j) products by cell of C.
+    bool products = false;
+    Value counterK;
+    int64_t lowerK = 0;
   } scatterSource;
   int64_t iterations = 0;                // tables: the iterations evaluated
   std::string where;                     // "nest N of F"

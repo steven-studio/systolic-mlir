@@ -19,6 +19,7 @@
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
@@ -502,9 +503,10 @@ ScatterRegions mlir::systolic::beginScatter(OpBuilder &builder, Location loc,
                                             ArrayRef<Operation *> slice, Operation *store,
                                             Value counterI, int64_t lowerI, Value counterJ,
                                             int64_t lowerJ, Value cMemref,
-                                            std::array<int64_t, 2> shape) {
+                                            std::array<int64_t, 2> shape, Value counterK,
+                                            int64_t lowerK, int64_t depth) {
   auto cType = cast<MemRefType>(cMemref.getType());
-  const int64_t sources = shape[0] * shape[1];
+  const int64_t sources = depth * shape[0] * shape[1];
   ScatterRegions regions;
   regions.targets = memref::AllocOp::create(
       builder, loc, MemRefType::get({sources}, builder.getIndexType()));
@@ -513,11 +515,13 @@ ScatterRegions mlir::systolic::beginScatter(OpBuilder &builder, Location loc,
   memref::StoreOp::create(builder, loc, indexConstant(builder, loc, 0), bad, ValueRange{});
   {
     OpBuilder::InsertionGuard guard(builder);
+    auto layers = affine::AffineForOp::create(builder, loc, 0, depth, 1);
+    builder.setInsertionPointToStart(layers.getBody());
     auto rows = affine::AffineForOp::create(builder, loc, 0, shape[0], 1);
     builder.setInsertionPointToStart(rows.getBody());
     auto columns = affine::AffineForOp::create(builder, loc, 0, shape[1], 1);
     builder.setInsertionPointToStart(columns.getBody());
-    Value r = rows.getInductionVar(), c = columns.getInductionVar();
+    Value q = layers.getInductionVar(), r = rows.getInductionVar(), c = columns.getInductionVar();
     MLIRContext *context = builder.getContext();
     auto shifted = [&](Value iv, int64_t by) -> Value {
       return affine::AffineApplyOp::create(
@@ -526,6 +530,8 @@ ScatterRegions mlir::systolic::beginScatter(OpBuilder &builder, Location loc,
     IRMapping mapping;
     mapping.map(counterI, shifted(r, lowerI));
     mapping.map(counterJ, shifted(c, lowerJ));
+    if (counterK)
+      mapping.map(counterK, shifted(q, lowerK));
     Value ok = arith::ConstantIntOp::create(builder, loc, 1, 1);
     // The indices of an access as values of the re-emitted computation.
     auto indicesOf = [&](Operation *op, SmallVector<Value> &result) {
@@ -585,8 +591,10 @@ ScatterRegions mlir::systolic::beginScatter(OpBuilder &builder, Location loc,
     }
     Value source = affine::AffineApplyOp::create(
         builder, loc,
-        AffineMap::get(2, 0, getAffineDimExpr(0, context) * shape[1] + getAffineDimExpr(1, context)),
-        ValueRange{r, c});
+        AffineMap::get(3, 0,
+                       (getAffineDimExpr(0, context) * shape[0] + getAffineDimExpr(1, context)) * shape[1] +
+                           getAffineDimExpr(2, context)),
+        ValueRange{q, r, c});
     memref::StoreOp::create(builder, loc, flat, regions.targets, ValueRange{source});
     Value count = memref::LoadOp::create(builder, loc, bad, ValueRange{});
     Value more = arith::AddIOp::create(builder, loc, count, indexConstant(builder, loc, 1));
@@ -692,4 +700,48 @@ void mlir::systolic::scatterAddByInverseMap(OpBuilder &builder, Location loc, Va
     }
     memref::StoreOp::create(builder, loc, sum.getResult(0), cFlat, ValueRange{m});
   });
+}
+
+Value mlir::systolic::materializeProductMatrices(OpBuilder &builder, Location loc, Value aTensor,
+                                                 Value bTensor, int64_t M, int64_t N, int64_t K,
+                                                 const std::optional<SystolicTilePlan> &plan,
+                                                 const SystolicFleet &fleet,
+                                                 int64_t &nextGemmIndex, Type elementType) {
+  auto productsType = MemRefType::get({K, M, N}, elementType);
+  Value products = memref::AllocOp::create(builder, loc, productsType);
+  Value zero = arith::ConstantOp::create(builder, loc, builder.getZeroAttr(elementType));
+  {
+    OpBuilder::InsertionGuard guard(builder);
+    SmallVector<Value, 3> ivs;
+    for (int64_t extent : {K, M, N}) {
+      auto f = affine::AffineForOp::create(builder, loc, 0, extent, 1);
+      builder.setInsertionPointToStart(f.getBody());
+      ivs.push_back(f.getInductionVar());
+    }
+    affine::AffineStoreOp::create(builder, loc, zero, products, ivs);
+  }
+  auto sizes1 = [&](ArrayRef<int64_t> v) {
+    SmallVector<OpFoldResult> out;
+    for (int64_t x : v)
+      out.push_back(builder.getIndexAttr(x));
+    return out;
+  };
+  for (int64_t k = 0; k < K; ++k) {
+    Value aColumn = tensor::ExtractSliceOp::create(builder, loc, aTensor, sizes1({0, k}), sizes1({M, 1}),
+                                                   sizes1({1, 1}));
+    Value bRow = tensor::ExtractSliceOp::create(builder, loc, bTensor, sizes1({k, 0}), sizes1({1, N}),
+                                                sizes1({1, 1}));
+    // products[k], an M x N view.
+    auto layer = memref::SubViewOp::create(
+        builder, loc,
+        cast<MemRefType>(memref::SubViewOp::inferRankReducedResultType({M, N}, productsType, sizes1({k, 0, 0}),
+                                                                       sizes1({1, M, N}), sizes1({1, 1, 1}))),
+        products, sizes1({k, 0, 0}), sizes1({1, M, N}), sizes1({1, 1, 1}));
+    auto tensorType = RankedTensorType::get({M, N}, elementType);
+    Value cTensor = bufferization::ToTensorOp::create(builder, loc, tensorType, layer,
+                                                      /*restrict=*/true, /*writable=*/true);
+    Value result = emitMatmulTiles(builder, loc, aColumn, bRow, cTensor, M, N, 1, plan, fleet, nextGemmIndex);
+    writeBackMatmulResult(builder, loc, result, layer);
+  }
+  return products;
 }

@@ -307,9 +307,23 @@ struct ScatterRegions {
   Block *elseBlock = nullptr;
   Operation *afterThen = nullptr; // the then-block's terminator
 };
+///
+/// exp/k-scatter: with `counterK` (C's address reads K), the domain is depth x rows x columns,
+/// counterK = lowerK + k, and the targets are kept by source (k * rows + r) * columns + c.
 ScatterRegions beginScatter(OpBuilder &builder, Location loc, ArrayRef<Operation *> slice,
                             Operation *store, Value counterI, int64_t lowerI, Value counterJ,
-                            int64_t lowerJ, Value cMemref, std::array<int64_t, 2> shape);
+                            int64_t lowerJ, Value cMemref, std::array<int64_t, 2> shape,
+                            Value counterK = Value(), int64_t lowerK = 0, int64_t depth = 1);
+
+/// exp/k-scatter: every product A[r][k] * B[k][c] of the M x K and K x N tensors, once each:
+/// a depth x rows x columns memref.alloc of `elementType`, zeroed, and per k the tiles of the
+/// K = 1 GEMM of A's column k and B's row k (`plan`, the plan of an M x N x 1 GEMM) written into
+/// its k-th M x N matrix. The tiles sum each product from zero, as every tile does.
+Value materializeProductMatrices(OpBuilder &builder, Location loc, Value aTensor, Value bTensor,
+                                 int64_t M, int64_t N, int64_t K,
+                                 const std::optional<SystolicTilePlan> &plan,
+                                 const SystolicFleet &fleet, int64_t &nextGemmIndex,
+                                 Type elementType);
 
 /// A rows x columns memref.alloc of `elementType` filled with zeros.
 Value materializeZeroMatrix(OpBuilder &builder, Location loc, std::array<int64_t, 2> shape,

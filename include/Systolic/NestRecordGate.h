@@ -162,6 +162,10 @@ struct RecordAtNest {
   // gathers at an index that is not mapped. Only the scatter-add takes such a record.
   bool outputMayCollide = false;
   bool outputGathered = false;
+  // Experimental (exp/k-scatter), with unmappedViews: the record's family is pointwise (P the
+  // three loops, I, J and K empty), its fold verified at the symbolic tier over a domain
+  // verified exact and of unit multiplicity. Only the product scatter-add takes it.
+  bool pointwise = false;
 };
 
 /// The record of the nest whose outermost loop is `anchor`, and the checks of the record by

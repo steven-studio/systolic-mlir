@@ -1,0 +1,1485 @@
+[
+{
+    "authorizes_lowering": false,
+    "composition": "each record is a claim about its nest from any memory at the nest's entry, so the statements keep their order and no nest is taken to be independent of another",
+    "dependences": [],
+    "dependences_note": "by root, so what may be and not what is: never a reason to call two nests independent",
+    "function": "k_square__systolic_kernel",
+    "nests": [
+      {
+        "assumptions": [
+          "roots 0 and 1 are separate: authorized, with an llvm.noalias source contract, not proved",
+          "roots 0 and 2 are separate: authorized, with an llvm.noalias source contract, not proved, and used by the computation claim",
+          "roots 1 and 2 are separate: authorized, with an llvm.noalias source contract, not proved, and used by the computation claim",
+          "the claims are about the runs of the nest that complete: a run may stop on NaN result: payload is not determined",
+          "index values are bit vectors of width 64"
+        ],
+        "authorizes_lowering": false,
+        "binding": {
+          "index_width": 64,
+          "reason": "",
+          "scheme": "generalized-gemm-nest-binding/1",
+          "sha256": "a3521697d110756881f486d8270d1a5e47085371d31dd9998febf15f8cb6c35d"
+        },
+        "column": 3,
+        "conditions": 0,
+        "function": "k_square__systolic_kernel",
+        "gemm": {
+          "accumulation": {
+            "accumulator_first": true,
+            "element": "f32",
+            "fold": "ORDERED_FLOAT",
+            "multiply": "fmul",
+            "order": "the levels, outermost first, each in its direction",
+            "reduction": "fadd",
+            "sites": 1,
+            "sites_agree": true,
+            "starts_from": "the value of the cell at the nest's entry",
+            "statement": "C[h] := C[h] + A[f] * B[g]"
+          },
+          "axes": {
+            "I": [],
+            "J": [],
+            "K": [],
+            "P": [
+              0,
+              1,
+              2
+            ]
+          },
+          "box": false,
+          "candidate": 1,
+          "extents": null,
+          "frame": {
+            "other_reads": 0,
+            "other_writes": 0
+          },
+          "group": 0,
+          "guard": "true",
+          "levels": [
+            {
+              "axis": "P",
+              "descending": false,
+              "extent": 8,
+              "level": 0,
+              "lower": 0,
+              "signed": false,
+              "upper": 8,
+              "value": "(state:bv64 2)"
+            },
+            {
+              "axis": "P",
+              "descending": false,
+              "extent": 8,
+              "level": 1,
+              "lower": 0,
+              "signed": false,
+              "upper": 8,
+              "value": "(state:bv64 5)"
+            },
+            {
+              "axis": "P",
+              "descending": false,
+              "extent": 12,
+              "level": 2,
+              "lower": 0,
+              "signed": false,
+              "upper": 12,
+              "value": "(state:bv64 8)"
+            }
+          ],
+          "multiply_flags": [
+            "reassoc"
+          ],
+          "reduction_flags": [
+            "reassoc"
+          ],
+          "reorder": {
+            "float": {
+              "detail": "reversing cell 49 of root 2 changes its final bits",
+              "point": [],
+              "status": "REFUTED",
+              "tier": "PROPOSED",
+              "witness_memory": true
+            },
+            "integer": {
+              "detail": "not an integer fold",
+              "status": "UNKNOWN",
+              "tier": "PROPOSED",
+              "witness_memory": false
+            },
+            "trivial": {
+              "detail": "a cell has more than one contribution",
+              "point": [],
+              "status": "REFUTED",
+              "tier": "PROPOSED",
+              "witness_memory": false
+            }
+          },
+          "tiers": {
+            "computation": {
+              "finite": {
+                "reason": "Herbrand replay equal at each listed point, for all initial memories",
+                "status": "VERIFIED",
+                "tier": "POINT"
+              },
+              "symbolic": {
+                "reason": "E, OP, R, W and F discharged over the scope",
+                "status": "VERIFIED",
+                "tier": "SYMBOLIC"
+              }
+            },
+            "coordinate": {
+              "finite": "SCOPE_ENUMERATED",
+              "symbolic": "PROPOSED"
+            },
+            "domain": {
+              "finite": {
+                "exact_order": true,
+                "reason": "each listed point enumerated exactly, in order",
+                "status": "VERIFIED",
+                "tier": "POINT"
+              },
+              "symbolic": {
+                "exact_order": true,
+                "multiplicity": "UNIT",
+                "reason": "D1 to D3 discharged over the scope",
+                "status": "VERIFIED",
+                "tier": "SYMBOLIC"
+              }
+            },
+            "facts": {
+              "cell_key": {
+                "detail": "K1 over the scope",
+                "status": "PROVEN",
+                "tier": "SYMBOLIC",
+                "witness_memory": false
+              },
+              "output_injective": {
+                "detail": "C1 not discharged; a point may show it",
+                "status": "UNKNOWN",
+                "tier": "PROPOSED",
+                "witness_memory": false
+              },
+              "single_contribution": {
+                "detail": "T1 not discharged",
+                "status": "UNKNOWN",
+                "tier": "PROPOSED",
+                "witness_memory": false
+              }
+            },
+            "termination": "PROVEN_TERMINATING_IF_DEFINED",
+            "theorem13": {
+              "holds_for": "runs that complete",
+              "logical_tier": "PROPOSED",
+              "reason": "G4a and Theorem 12 over the scope",
+              "status": "VERIFIED",
+              "tier": "SYMBOLIC"
+            }
+          },
+          "views": {
+            "A": {
+              "affine": true,
+              "dimensions": [
+                {
+                  "affine": true,
+                  "constant": 0,
+                  "form": "level0",
+                  "levels": [
+                    {
+                      "coefficient": 1,
+                      "level": 0
+                    }
+                  ],
+                  "offset": null,
+                  "parameters": [],
+                  "roles": []
+                },
+                {
+                  "affine": true,
+                  "constant": 0,
+                  "form": "level2",
+                  "levels": [
+                    {
+                      "coefficient": 1,
+                      "level": 2
+                    }
+                  ],
+                  "offset": null,
+                  "parameters": [],
+                  "roles": []
+                }
+              ],
+              "fact": "PROVEN at SYMBOLIC (over the scope)",
+              "proposed": true,
+              "proved": true,
+              "root": {
+                "argument": 0,
+                "noalias": true,
+                "origin": "argument",
+                "root": 0,
+                "type": "memref<8x12xf32>"
+              }
+            },
+            "B": {
+              "affine": true,
+              "dimensions": [
+                {
+                  "affine": true,
+                  "constant": 0,
+                  "form": "level2",
+                  "levels": [
+                    {
+                      "coefficient": 1,
+                      "level": 2
+                    }
+                  ],
+                  "offset": null,
+                  "parameters": [],
+                  "roles": []
+                },
+                {
+                  "affine": true,
+                  "constant": 0,
+                  "form": "level1",
+                  "levels": [
+                    {
+                      "coefficient": 1,
+                      "level": 1
+                    }
+                  ],
+                  "offset": null,
+                  "parameters": [],
+                  "roles": []
+                }
+              ],
+              "fact": "PROVEN at SYMBOLIC (over the scope)",
+              "proposed": true,
+              "proved": true,
+              "root": {
+                "argument": 1,
+                "noalias": true,
+                "origin": "argument",
+                "root": 1,
+                "type": "memref<12x8xf32>"
+              }
+            },
+            "C": {
+              "affine": false,
+              "dimensions": [
+                {
+                  "affine": false,
+                  "constant": null,
+                  "form": "(add:bv64 (mul:bv64 (state:bv64 16777216) (state:bv64 16777216)) (state:bv64 16777218))",
+                  "levels": [],
+                  "offset": null,
+                  "parameters": [],
+                  "roles": []
+                },
+                {
+                  "affine": true,
+                  "constant": 0,
+                  "form": "level1",
+                  "levels": [
+                    {
+                      "coefficient": 1,
+                      "level": 1
+                    }
+                  ],
+                  "offset": null,
+                  "parameters": [],
+                  "roles": []
+                }
+              ],
+              "fact": "PROVEN at SYMBOLIC (over the scope)",
+              "proposed": true,
+              "proved": true,
+              "root": {
+                "argument": 2,
+                "noalias": true,
+                "origin": "argument",
+                "root": 2,
+                "type": "memref<64x8xf32>"
+              }
+            }
+          }
+        },
+        "line": 60,
+        "location": "generalized_k_scatter.c:60:3",
+        "loop": "affine.for",
+        "model": {
+          "candidates": 2,
+          "gate": "OPEN",
+          "gate_reason": "",
+          "groups": 1,
+          "reason": "",
+          "sites": 1,
+          "status": "SUPPORTED",
+          "termination": "PROVEN_TERMINATING_IF_DEFINED"
+        },
+        "nest": 0,
+        "ordered_fold": {
+          "reason": "Theorem 13 is VERIFIED at SYMBOLIC (G4a and Theorem 12 over the scope), for the runs that complete, and the frame of the computation claim has no write",
+          "verified": true
+        },
+        "ordered_fold_verified": true,
+        "outline": {
+          "constants_copied": 0,
+          "entry_memory": "any: what ran before the nest is not assumed",
+          "function": "k_square__systolic_kernel__nest0",
+          "reason": "",
+          "roots": [
+            {
+              "access": [
+                "read"
+              ],
+              "argument": 0,
+              "as": 0,
+              "noalias": true,
+              "origin": "argument",
+              "root": 0,
+              "type": "memref<8x12xf32>"
+            },
+            {
+              "access": [
+                "read"
+              ],
+              "argument": 1,
+              "as": 1,
+              "noalias": true,
+              "origin": "argument",
+              "root": 1,
+              "type": "memref<12x8xf32>"
+            },
+            {
+              "access": [
+                "read",
+                "write"
+              ],
+              "argument": 2,
+              "as": 2,
+              "noalias": true,
+              "origin": "argument",
+              "root": 2,
+              "type": "memref<64x8xf32>"
+            }
+          ],
+          "scalars": [],
+          "status": "OUTLINED"
+        },
+        "reassociation": {
+          "basis": "source flag",
+          "detail": "every accumulation of the nest carries reassoc: the programmer's permission, and no proof that another order gives the same bits (the float reorder fact is REFUTED)",
+          "permitted": true,
+          "source_flag_reassoc": true
+        },
+        "reassociation_permitted": true,
+        "refusals": [
+          "the coordinates I, J and K are not verified over the scope: the logical tier is PROPOSED",
+          "the family has a batch coordinate (axis P), and batches are not mapped",
+          "axis I has 0 levels, and a box has one",
+          "axis J has 0 levels, and a box has one",
+          "axis K has 0 levels, and a box has one",
+          "dimension 0 of the view of C is not affine: (add:bv64 (mul:bv64 (state:bv64 16777216) (state:bv64 16777216)) (state:bv64 16777218))",
+          "dimension 1 of the view of C reads level 1 (axis P), which is no role of C",
+          "dimension 0 of the view of A reads level 0 (axis P), which is no role of A",
+          "dimension 1 of the view of A reads level 2 (axis P), which is no role of A",
+          "dimension 0 of the view of B reads level 2 (axis P), which is no role of B",
+          "dimension 1 of the view of B reads level 1 (axis P), which is no role of B",
+          "two logical outputs may share a cell of C: the fact is UNKNOWN at PROPOSED (C1 not discharged; a point may show it)"
+        ],
+        "scope": [],
+        "separation": [
+          {
+            "apart": true,
+            "basis": "authorized, with an llvm.noalias source contract",
+            "kind": "assumption",
+            "name": "roots 0 and 1 are separate",
+            "roots": [
+              0,
+              1
+            ],
+            "used": false
+          },
+          {
+            "apart": true,
+            "basis": "authorized, with an llvm.noalias source contract",
+            "kind": "assumption",
+            "name": "roots 0 and 2 are separate",
+            "roots": [
+              0,
+              2
+            ],
+            "used": true
+          },
+          {
+            "apart": true,
+            "basis": "authorized, with an llvm.noalias source contract",
+            "kind": "assumption",
+            "name": "roots 1 and 2 are separate",
+            "roots": [
+              1,
+              2
+            ],
+            "used": true
+          }
+        ],
+        "statement": 0,
+        "status": "VERIFIED_NOT_MAPPED"
+      }
+    ],
+    "order": [
+      {
+        "conditions": 0,
+        "kind": "nest",
+        "location": "generalized_k_scatter.c:60:3",
+        "nest": 0,
+        "operation": "affine.for",
+        "statement": 0
+      }
+    ],
+    "reason": "",
+    "roots": [
+      {
+        "argument": 0,
+        "noalias": true,
+        "origin": "argument",
+        "root": 0,
+        "type": "memref<8x12xf32>"
+      },
+      {
+        "argument": 1,
+        "noalias": true,
+        "origin": "argument",
+        "root": 1,
+        "type": "memref<12x8xf32>"
+      },
+      {
+        "argument": 2,
+        "noalias": true,
+        "origin": "argument",
+        "root": 2,
+        "type": "memref<64x8xf32>"
+      }
+    ],
+    "schema": "generalized-gemm-nest/2",
+    "status": "OUTLINED"
+  },
+{
+    "authorizes_lowering": false,
+    "composition": "each record is a claim about its nest from any memory at the nest's entry, so the statements keep their order and no nest is taken to be independent of another",
+    "dependences": [],
+    "dependences_note": "by root, so what may be and not what is: never a reason to call two nests independent",
+    "function": "k_cubic__systolic_kernel",
+    "nests": [
+      {
+        "assumptions": [
+          "roots 0 and 1 are separate: authorized, with an llvm.noalias source contract, not proved",
+          "roots 0 and 2 are separate: authorized, with an llvm.noalias source contract, not proved, and used by the computation claim",
+          "roots 1 and 2 are separate: authorized, with an llvm.noalias source contract, not proved, and used by the computation claim",
+          "the claims are about the runs of the nest that complete: a run may stop on NaN result: payload is not determined",
+          "index values are bit vectors of width 64"
+        ],
+        "authorizes_lowering": false,
+        "binding": {
+          "index_width": 64,
+          "reason": "",
+          "scheme": "generalized-gemm-nest-binding/1",
+          "sha256": "5dbcd9b3c77c7ee2804d22adeb7fe4eb2693d728b1fc0ff7e676f91a49c8e53a"
+        },
+        "column": 3,
+        "conditions": 0,
+        "function": "k_cubic__systolic_kernel",
+        "gemm": {
+          "accumulation": {
+            "accumulator_first": true,
+            "element": "f32",
+            "fold": "ORDERED_FLOAT",
+            "multiply": "fmul",
+            "order": "the levels, outermost first, each in its direction",
+            "reduction": "fadd",
+            "sites": 1,
+            "sites_agree": true,
+            "starts_from": "the value of the cell at the nest's entry",
+            "statement": "C[h] := C[h] + A[f] * B[g]"
+          },
+          "axes": {
+            "I": [],
+            "J": [],
+            "K": [],
+            "P": [
+              0,
+              1,
+              2
+            ]
+          },
+          "box": false,
+          "candidate": 1,
+          "extents": null,
+          "frame": {
+            "other_reads": 0,
+            "other_writes": 0
+          },
+          "group": 0,
+          "guard": "true",
+          "levels": [
+            {
+              "axis": "P",
+              "descending": false,
+              "extent": 8,
+              "level": 0,
+              "lower": 0,
+              "signed": false,
+              "upper": 8,
+              "value": "(state:bv64 2)"
+            },
+            {
+              "axis": "P",
+              "descending": false,
+              "extent": 8,
+              "level": 1,
+              "lower": 0,
+              "signed": false,
+              "upper": 8,
+              "value": "(state:bv64 5)"
+            },
+            {
+              "axis": "P",
+              "descending": false,
+              "extent": 12,
+              "level": 2,
+              "lower": 0,
+              "signed": false,
+              "upper": 12,
+              "value": "(state:bv64 8)"
+            }
+          ],
+          "multiply_flags": [
+            "reassoc"
+          ],
+          "reduction_flags": [
+            "reassoc"
+          ],
+          "reorder": {
+            "float": {
+              "detail": "reversing cell 1 of root 2 changes its final bits",
+              "point": [],
+              "status": "REFUTED",
+              "tier": "PROPOSED",
+              "witness_memory": true
+            },
+            "integer": {
+              "detail": "not an integer fold",
+              "status": "UNKNOWN",
+              "tier": "PROPOSED",
+              "witness_memory": false
+            },
+            "trivial": {
+              "detail": "a cell has more than one contribution",
+              "point": [],
+              "status": "REFUTED",
+              "tier": "PROPOSED",
+              "witness_memory": false
+            }
+          },
+          "tiers": {
+            "computation": {
+              "finite": {
+                "reason": "Herbrand replay equal at each listed point, for all initial memories",
+                "status": "VERIFIED",
+                "tier": "POINT"
+              },
+              "symbolic": {
+                "reason": "E, OP, R, W and F discharged over the scope",
+                "status": "VERIFIED",
+                "tier": "SYMBOLIC"
+              }
+            },
+            "coordinate": {
+              "finite": "SCOPE_ENUMERATED",
+              "symbolic": "PROPOSED"
+            },
+            "domain": {
+              "finite": {
+                "exact_order": true,
+                "reason": "each listed point enumerated exactly, in order",
+                "status": "VERIFIED",
+                "tier": "POINT"
+              },
+              "symbolic": {
+                "exact_order": true,
+                "multiplicity": "UNIT",
+                "reason": "D1 to D3 discharged over the scope",
+                "status": "VERIFIED",
+                "tier": "SYMBOLIC"
+              }
+            },
+            "facts": {
+              "cell_key": {
+                "detail": "K1 over the scope",
+                "status": "PROVEN",
+                "tier": "SYMBOLIC",
+                "witness_memory": false
+              },
+              "output_injective": {
+                "detail": "C1 not discharged; a point may show it",
+                "status": "UNKNOWN",
+                "tier": "PROPOSED",
+                "witness_memory": false
+              },
+              "single_contribution": {
+                "detail": "T1 not discharged",
+                "status": "UNKNOWN",
+                "tier": "PROPOSED",
+                "witness_memory": false
+              }
+            },
+            "termination": "PROVEN_TERMINATING_IF_DEFINED",
+            "theorem13": {
+              "holds_for": "runs that complete",
+              "logical_tier": "PROPOSED",
+              "reason": "G4a and Theorem 12 over the scope",
+              "status": "VERIFIED",
+              "tier": "SYMBOLIC"
+            }
+          },
+          "views": {
+            "A": {
+              "affine": true,
+              "dimensions": [
+                {
+                  "affine": true,
+                  "constant": 0,
+                  "form": "level0",
+                  "levels": [
+                    {
+                      "coefficient": 1,
+                      "level": 0
+                    }
+                  ],
+                  "offset": null,
+                  "parameters": [],
+                  "roles": []
+                },
+                {
+                  "affine": true,
+                  "constant": 0,
+                  "form": "level2",
+                  "levels": [
+                    {
+                      "coefficient": 1,
+                      "level": 2
+                    }
+                  ],
+                  "offset": null,
+                  "parameters": [],
+                  "roles": []
+                }
+              ],
+              "fact": "PROVEN at SYMBOLIC (over the scope)",
+              "proposed": true,
+              "proved": true,
+              "root": {
+                "argument": 0,
+                "noalias": true,
+                "origin": "argument",
+                "root": 0,
+                "type": "memref<8x12xf32>"
+              }
+            },
+            "B": {
+              "affine": true,
+              "dimensions": [
+                {
+                  "affine": true,
+                  "constant": 0,
+                  "form": "level2",
+                  "levels": [
+                    {
+                      "coefficient": 1,
+                      "level": 2
+                    }
+                  ],
+                  "offset": null,
+                  "parameters": [],
+                  "roles": []
+                },
+                {
+                  "affine": true,
+                  "constant": 0,
+                  "form": "level1",
+                  "levels": [
+                    {
+                      "coefficient": 1,
+                      "level": 1
+                    }
+                  ],
+                  "offset": null,
+                  "parameters": [],
+                  "roles": []
+                }
+              ],
+              "fact": "PROVEN at SYMBOLIC (over the scope)",
+              "proposed": true,
+              "proved": true,
+              "root": {
+                "argument": 1,
+                "noalias": true,
+                "origin": "argument",
+                "root": 1,
+                "type": "memref<12x8xf32>"
+              }
+            },
+            "C": {
+              "affine": false,
+              "dimensions": [
+                {
+                  "affine": false,
+                  "constant": null,
+                  "form": "(srem:bv64 (add:bv64 (mul:bv64 (mul:bv64 (state:bv64 16777216) (state:bv64 16777216)) (state:bv64 16777216)) (mul:bv64 (const:bv64 0x2) (state:bv64 16777218))) (const:bv64 0x10))",
+                  "levels": [],
+                  "offset": null,
+                  "parameters": [],
+                  "roles": []
+                },
+                {
+                  "affine": true,
+                  "constant": 0,
+                  "form": "level1",
+                  "levels": [
+                    {
+                      "coefficient": 1,
+                      "level": 1
+                    }
+                  ],
+                  "offset": null,
+                  "parameters": [],
+                  "roles": []
+                }
+              ],
+              "fact": "PROVEN at SYMBOLIC (over the scope)",
+              "proposed": true,
+              "proved": true,
+              "root": {
+                "argument": 2,
+                "noalias": true,
+                "origin": "argument",
+                "root": 2,
+                "type": "memref<16x8xf32>"
+              }
+            }
+          }
+        },
+        "line": 68,
+        "location": "generalized_k_scatter.c:68:3",
+        "loop": "affine.for",
+        "model": {
+          "candidates": 2,
+          "gate": "OPEN",
+          "gate_reason": "",
+          "groups": 1,
+          "reason": "",
+          "sites": 1,
+          "status": "SUPPORTED",
+          "termination": "PROVEN_TERMINATING_IF_DEFINED"
+        },
+        "nest": 0,
+        "ordered_fold": {
+          "reason": "Theorem 13 is VERIFIED at SYMBOLIC (G4a and Theorem 12 over the scope), for the runs that complete, and the frame of the computation claim has no write",
+          "verified": true
+        },
+        "ordered_fold_verified": true,
+        "outline": {
+          "constants_copied": 0,
+          "entry_memory": "any: what ran before the nest is not assumed",
+          "function": "k_cubic__systolic_kernel__nest0",
+          "reason": "",
+          "roots": [
+            {
+              "access": [
+                "read"
+              ],
+              "argument": 0,
+              "as": 0,
+              "noalias": true,
+              "origin": "argument",
+              "root": 0,
+              "type": "memref<8x12xf32>"
+            },
+            {
+              "access": [
+                "read"
+              ],
+              "argument": 1,
+              "as": 1,
+              "noalias": true,
+              "origin": "argument",
+              "root": 1,
+              "type": "memref<12x8xf32>"
+            },
+            {
+              "access": [
+                "read",
+                "write"
+              ],
+              "argument": 2,
+              "as": 2,
+              "noalias": true,
+              "origin": "argument",
+              "root": 2,
+              "type": "memref<16x8xf32>"
+            }
+          ],
+          "scalars": [],
+          "status": "OUTLINED"
+        },
+        "reassociation": {
+          "basis": "source flag",
+          "detail": "every accumulation of the nest carries reassoc: the programmer's permission, and no proof that another order gives the same bits (the float reorder fact is REFUTED)",
+          "permitted": true,
+          "source_flag_reassoc": true
+        },
+        "reassociation_permitted": true,
+        "refusals": [
+          "the coordinates I, J and K are not verified over the scope: the logical tier is PROPOSED",
+          "the family has a batch coordinate (axis P), and batches are not mapped",
+          "axis I has 0 levels, and a box has one",
+          "axis J has 0 levels, and a box has one",
+          "axis K has 0 levels, and a box has one",
+          "dimension 0 of the view of C is not affine: (srem:bv64 (add:bv64 (mul:bv64 (mul:bv64 (state:bv64 16777216) (state:bv64 16777216)) (state:bv64 16777216)) (mul:bv64 (const:bv64 0x2) (state:bv64 16777218))) (const:bv64 0x10))",
+          "dimension 1 of the view of C reads level 1 (axis P), which is no role of C",
+          "dimension 0 of the view of A reads level 0 (axis P), which is no role of A",
+          "dimension 1 of the view of A reads level 2 (axis P), which is no role of A",
+          "dimension 0 of the view of B reads level 2 (axis P), which is no role of B",
+          "dimension 1 of the view of B reads level 1 (axis P), which is no role of B",
+          "two logical outputs may share a cell of C: the fact is UNKNOWN at PROPOSED (C1 not discharged; a point may show it)"
+        ],
+        "scope": [],
+        "separation": [
+          {
+            "apart": true,
+            "basis": "authorized, with an llvm.noalias source contract",
+            "kind": "assumption",
+            "name": "roots 0 and 1 are separate",
+            "roots": [
+              0,
+              1
+            ],
+            "used": false
+          },
+          {
+            "apart": true,
+            "basis": "authorized, with an llvm.noalias source contract",
+            "kind": "assumption",
+            "name": "roots 0 and 2 are separate",
+            "roots": [
+              0,
+              2
+            ],
+            "used": true
+          },
+          {
+            "apart": true,
+            "basis": "authorized, with an llvm.noalias source contract",
+            "kind": "assumption",
+            "name": "roots 1 and 2 are separate",
+            "roots": [
+              1,
+              2
+            ],
+            "used": true
+          }
+        ],
+        "statement": 0,
+        "status": "VERIFIED_NOT_MAPPED"
+      }
+    ],
+    "order": [
+      {
+        "conditions": 0,
+        "kind": "nest",
+        "location": "generalized_k_scatter.c:68:3",
+        "nest": 0,
+        "operation": "affine.for",
+        "statement": 0
+      }
+    ],
+    "reason": "",
+    "roots": [
+      {
+        "argument": 0,
+        "noalias": true,
+        "origin": "argument",
+        "root": 0,
+        "type": "memref<8x12xf32>"
+      },
+      {
+        "argument": 1,
+        "noalias": true,
+        "origin": "argument",
+        "root": 1,
+        "type": "memref<12x8xf32>"
+      },
+      {
+        "argument": 2,
+        "noalias": true,
+        "origin": "argument",
+        "root": 2,
+        "type": "memref<16x8xf32>"
+      }
+    ],
+    "schema": "generalized-gemm-nest/2",
+    "status": "OUTLINED"
+  },
+{
+    "authorizes_lowering": false,
+    "composition": "each record is a claim about its nest from any memory at the nest's entry, so the statements keep their order and no nest is taken to be independent of another",
+    "dependences": [],
+    "dependences_note": "by root, so what may be and not what is: never a reason to call two nests independent",
+    "function": "k_lookup__systolic_kernel",
+    "nests": [
+      {
+        "assumptions": [
+          "roots 0 and 1 are separate: authorized, with an llvm.noalias source contract, not proved",
+          "roots 0 and 2 are separate: authorized, with an llvm.noalias source contract, not proved",
+          "roots 0 and 3 are separate: authorized, with an llvm.noalias source contract, not proved, and used by the computation claim",
+          "roots 1 and 2 are separate: authorized, with an llvm.noalias source contract, not proved",
+          "roots 1 and 3 are separate: authorized, with an llvm.noalias source contract, not proved, and used by the computation claim",
+          "roots 2 and 3 are separate: authorized, with an llvm.noalias source contract, not proved, and used by the computation claim",
+          "the claims are about the runs of the nest that complete: a run may stop on memory access out of bounds; NaN result: payload is not determined",
+          "index values are bit vectors of width 64"
+        ],
+        "authorizes_lowering": false,
+        "binding": {
+          "index_width": 64,
+          "reason": "",
+          "scheme": "generalized-gemm-nest-binding/1",
+          "sha256": "0bb51b46f7d9bc74f56fd9334a1adfb816a86a7d0217533c5b488ad994e60515"
+        },
+        "column": 3,
+        "conditions": 0,
+        "function": "k_lookup__systolic_kernel",
+        "gemm": {
+          "accumulation": {
+            "accumulator_first": true,
+            "element": "f32",
+            "fold": "ORDERED_FLOAT",
+            "multiply": "fmul",
+            "order": "the levels, outermost first, each in its direction",
+            "reduction": "fadd",
+            "sites": 1,
+            "sites_agree": true,
+            "starts_from": "the value of the cell at the nest's entry",
+            "statement": "C[h] := C[h] + A[f] * B[g]"
+          },
+          "axes": {
+            "I": [],
+            "J": [],
+            "K": [],
+            "P": [
+              0,
+              1,
+              2
+            ]
+          },
+          "box": false,
+          "candidate": 1,
+          "extents": null,
+          "frame": {
+            "other_reads": 1,
+            "other_writes": 0
+          },
+          "group": 0,
+          "guard": "true",
+          "levels": [
+            {
+              "axis": "P",
+              "descending": false,
+              "extent": 8,
+              "level": 0,
+              "lower": 0,
+              "signed": false,
+              "upper": 8,
+              "value": "(state:bv64 2)"
+            },
+            {
+              "axis": "P",
+              "descending": false,
+              "extent": 8,
+              "level": 1,
+              "lower": 0,
+              "signed": false,
+              "upper": 8,
+              "value": "(state:bv64 5)"
+            },
+            {
+              "axis": "P",
+              "descending": false,
+              "extent": 12,
+              "level": 2,
+              "lower": 0,
+              "signed": false,
+              "upper": 12,
+              "value": "(state:bv64 8)"
+            }
+          ],
+          "multiply_flags": [
+            "reassoc"
+          ],
+          "reduction_flags": [
+            "reassoc"
+          ],
+          "reorder": {
+            "float": {
+              "detail": "reversing cell 0 of root 3 changes its final bits, at a designed memory",
+              "point": [],
+              "status": "REFUTED",
+              "tier": "PROPOSED",
+              "witness_memory": true
+            },
+            "integer": {
+              "detail": "not an integer fold",
+              "status": "UNKNOWN",
+              "tier": "PROPOSED",
+              "witness_memory": false
+            },
+            "trivial": {
+              "detail": "a cell has more than one contribution",
+              "point": [],
+              "status": "REFUTED",
+              "tier": "PROPOSED",
+              "witness_memory": false
+            }
+          },
+          "tiers": {
+            "computation": {
+              "finite": {
+                "reason": "Herbrand replay equal at each listed point, for all initial memories",
+                "status": "VERIFIED",
+                "tier": "POINT"
+              },
+              "symbolic": {
+                "reason": "E, OP, R, W and F discharged over the scope",
+                "status": "VERIFIED",
+                "tier": "SYMBOLIC"
+              }
+            },
+            "coordinate": {
+              "finite": "SCOPE_ENUMERATED",
+              "symbolic": "PROPOSED"
+            },
+            "domain": {
+              "finite": {
+                "exact_order": true,
+                "reason": "each listed point enumerated exactly, in order",
+                "status": "VERIFIED",
+                "tier": "POINT"
+              },
+              "symbolic": {
+                "exact_order": true,
+                "multiplicity": "UNIT",
+                "reason": "D1 to D3 discharged over the scope",
+                "status": "VERIFIED",
+                "tier": "SYMBOLIC"
+              }
+            },
+            "facts": {
+              "cell_key": {
+                "detail": "K1 over the scope",
+                "status": "PROVEN",
+                "tier": "SYMBOLIC",
+                "witness_memory": false
+              },
+              "output_injective": {
+                "detail": "C1 not discharged; a point may show it",
+                "status": "UNKNOWN",
+                "tier": "PROPOSED",
+                "witness_memory": false
+              },
+              "single_contribution": {
+                "detail": "T1 not discharged",
+                "status": "UNKNOWN",
+                "tier": "PROPOSED",
+                "witness_memory": false
+              }
+            },
+            "termination": "PROVEN_TERMINATING_IF_DEFINED",
+            "theorem13": {
+              "holds_for": "runs that complete",
+              "logical_tier": "PROPOSED",
+              "reason": "G4a and Theorem 12 over the scope",
+              "status": "VERIFIED",
+              "tier": "SYMBOLIC"
+            }
+          },
+          "views": {
+            "A": {
+              "affine": true,
+              "dimensions": [
+                {
+                  "affine": true,
+                  "constant": 0,
+                  "form": "level0",
+                  "levels": [
+                    {
+                      "coefficient": 1,
+                      "level": 0
+                    }
+                  ],
+                  "offset": null,
+                  "parameters": [],
+                  "roles": []
+                },
+                {
+                  "affine": true,
+                  "constant": 0,
+                  "form": "level2",
+                  "levels": [
+                    {
+                      "coefficient": 1,
+                      "level": 2
+                    }
+                  ],
+                  "offset": null,
+                  "parameters": [],
+                  "roles": []
+                }
+              ],
+              "fact": "PROVEN at SYMBOLIC (over the scope)",
+              "proposed": true,
+              "proved": true,
+              "root": {
+                "argument": 0,
+                "noalias": true,
+                "origin": "argument",
+                "root": 0,
+                "type": "memref<8x12xf32>"
+              }
+            },
+            "B": {
+              "affine": true,
+              "dimensions": [
+                {
+                  "affine": true,
+                  "constant": 0,
+                  "form": "level2",
+                  "levels": [
+                    {
+                      "coefficient": 1,
+                      "level": 2
+                    }
+                  ],
+                  "offset": null,
+                  "parameters": [],
+                  "roles": []
+                },
+                {
+                  "affine": true,
+                  "constant": 0,
+                  "form": "level1",
+                  "levels": [
+                    {
+                      "coefficient": 1,
+                      "level": 1
+                    }
+                  ],
+                  "offset": null,
+                  "parameters": [],
+                  "roles": []
+                }
+              ],
+              "fact": "PROVEN at SYMBOLIC (over the scope)",
+              "proposed": true,
+              "proved": true,
+              "root": {
+                "argument": 2,
+                "noalias": true,
+                "origin": "argument",
+                "root": 2,
+                "type": "memref<12x8xf32>"
+              }
+            },
+            "C": {
+              "affine": false,
+              "dimensions": [
+                {
+                  "affine": false,
+                  "constant": null,
+                  "form": "(sext:bv64 (load:bv32 (mem:mem1<1,i64,bv32> 1) (add:bv64 (state:bv64 16777216) (state:bv64 16777218))))",
+                  "gather": {
+                    "element": "bv32",
+                    "extend": "sext",
+                    "index": [
+                      {
+                        "affine": true,
+                        "constant": 0,
+                        "form": "level0 + level2",
+                        "levels": [
+                          {
+                            "coefficient": 1,
+                            "level": 0
+                          },
+                          {
+                            "coefficient": 1,
+                            "level": 2
+                          }
+                        ],
+                        "offset": null,
+                        "parameters": [],
+                        "roles": []
+                      }
+                    ],
+                    "root": {
+                      "argument": 1,
+                      "noalias": true,
+                      "origin": "argument",
+                      "root": 1,
+                      "type": "memref<32xi32>"
+                    }
+                  },
+                  "levels": [],
+                  "offset": null,
+                  "parameters": [],
+                  "roles": []
+                },
+                {
+                  "affine": true,
+                  "constant": 0,
+                  "form": "level1",
+                  "levels": [
+                    {
+                      "coefficient": 1,
+                      "level": 1
+                    }
+                  ],
+                  "offset": null,
+                  "parameters": [],
+                  "roles": []
+                }
+              ],
+              "fact": "PROVEN at SYMBOLIC (over the scope)",
+              "proposed": true,
+              "proved": true,
+              "root": {
+                "argument": 3,
+                "noalias": true,
+                "origin": "argument",
+                "root": 3,
+                "type": "memref<16x8xf32>"
+              }
+            }
+          }
+        },
+        "line": 76,
+        "location": "generalized_k_scatter.c:76:3",
+        "loop": "affine.for",
+        "model": {
+          "candidates": 2,
+          "gate": "OPEN",
+          "gate_reason": "",
+          "groups": 1,
+          "reason": "",
+          "sites": 1,
+          "status": "SUPPORTED",
+          "termination": "PROVEN_TERMINATING_IF_DEFINED"
+        },
+        "nest": 0,
+        "ordered_fold": {
+          "reason": "Theorem 13 is VERIFIED at SYMBOLIC (G4a and Theorem 12 over the scope), for the runs that complete, and the frame of the computation claim has no write",
+          "verified": true
+        },
+        "ordered_fold_verified": true,
+        "outline": {
+          "constants_copied": 0,
+          "entry_memory": "any: what ran before the nest is not assumed",
+          "function": "k_lookup__systolic_kernel__nest0",
+          "reason": "",
+          "roots": [
+            {
+              "access": [
+                "read"
+              ],
+              "argument": 0,
+              "as": 0,
+              "noalias": true,
+              "origin": "argument",
+              "root": 0,
+              "type": "memref<8x12xf32>"
+            },
+            {
+              "access": [
+                "read"
+              ],
+              "argument": 1,
+              "as": 1,
+              "noalias": true,
+              "origin": "argument",
+              "root": 1,
+              "type": "memref<32xi32>"
+            },
+            {
+              "access": [
+                "read"
+              ],
+              "argument": 2,
+              "as": 2,
+              "noalias": true,
+              "origin": "argument",
+              "root": 2,
+              "type": "memref<12x8xf32>"
+            },
+            {
+              "access": [
+                "read",
+                "write"
+              ],
+              "argument": 3,
+              "as": 3,
+              "noalias": true,
+              "origin": "argument",
+              "root": 3,
+              "type": "memref<16x8xf32>"
+            }
+          ],
+          "scalars": [],
+          "status": "OUTLINED"
+        },
+        "reassociation": {
+          "basis": "source flag",
+          "detail": "every accumulation of the nest carries reassoc: the programmer's permission, and no proof that another order gives the same bits (the float reorder fact is REFUTED)",
+          "permitted": true,
+          "source_flag_reassoc": true
+        },
+        "reassociation_permitted": true,
+        "refusals": [
+          "the coordinates I, J and K are not verified over the scope: the logical tier is PROPOSED",
+          "the family has a batch coordinate (axis P), and batches are not mapped",
+          "axis I has 0 levels, and a box has one",
+          "axis J has 0 levels, and a box has one",
+          "axis K has 0 levels, and a box has one",
+          "dimension 0 of the view of C gathers at an index that is not mapped: level0 + level2",
+          "dimension 1 of the view of C reads level 1 (axis P), which is no role of C",
+          "dimension 0 of the view of A reads level 0 (axis P), which is no role of A",
+          "dimension 1 of the view of A reads level 2 (axis P), which is no role of A",
+          "dimension 0 of the view of B reads level 2 (axis P), which is no role of B",
+          "dimension 1 of the view of B reads level 1 (axis P), which is no role of B",
+          "two logical outputs may share a cell of C: the fact is UNKNOWN at PROPOSED (C1 not discharged; a point may show it)"
+        ],
+        "scope": [],
+        "separation": [
+          {
+            "apart": true,
+            "basis": "authorized, with an llvm.noalias source contract",
+            "kind": "assumption",
+            "name": "roots 0 and 1 are separate",
+            "roots": [
+              0,
+              1
+            ],
+            "used": false
+          },
+          {
+            "apart": true,
+            "basis": "authorized, with an llvm.noalias source contract",
+            "kind": "assumption",
+            "name": "roots 0 and 2 are separate",
+            "roots": [
+              0,
+              2
+            ],
+            "used": false
+          },
+          {
+            "apart": true,
+            "basis": "authorized, with an llvm.noalias source contract",
+            "kind": "assumption",
+            "name": "roots 0 and 3 are separate",
+            "roots": [
+              0,
+              3
+            ],
+            "used": true
+          },
+          {
+            "apart": true,
+            "basis": "authorized, with an llvm.noalias source contract",
+            "kind": "assumption",
+            "name": "roots 1 and 2 are separate",
+            "roots": [
+              1,
+              2
+            ],
+            "used": false
+          },
+          {
+            "apart": true,
+            "basis": "authorized, with an llvm.noalias source contract",
+            "kind": "assumption",
+            "name": "roots 1 and 3 are separate",
+            "roots": [
+              1,
+              3
+            ],
+            "used": true
+          },
+          {
+            "apart": true,
+            "basis": "authorized, with an llvm.noalias source contract",
+            "kind": "assumption",
+            "name": "roots 2 and 3 are separate",
+            "roots": [
+              2,
+              3
+            ],
+            "used": true
+          }
+        ],
+        "statement": 0,
+        "status": "VERIFIED_NOT_MAPPED"
+      }
+    ],
+    "order": [
+      {
+        "conditions": 0,
+        "kind": "nest",
+        "location": "generalized_k_scatter.c:76:3",
+        "nest": 0,
+        "operation": "affine.for",
+        "statement": 0
+      }
+    ],
+    "reason": "",
+    "roots": [
+      {
+        "argument": 0,
+        "noalias": true,
+        "origin": "argument",
+        "root": 0,
+        "type": "memref<8x12xf32>"
+      },
+      {
+        "argument": 1,
+        "noalias": true,
+        "origin": "argument",
+        "root": 1,
+        "type": "memref<32xi32>"
+      },
+      {
+        "argument": 2,
+        "noalias": true,
+        "origin": "argument",
+        "root": 2,
+        "type": "memref<12x8xf32>"
+      },
+      {
+        "argument": 3,
+        "noalias": true,
+        "origin": "argument",
+        "root": 3,
+        "type": "memref<16x8xf32>"
+      }
+    ],
+    "schema": "generalized-gemm-nest/2",
+    "status": "OUTLINED"
+  }
+]

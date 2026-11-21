@@ -339,12 +339,31 @@ RecordAtNest checkRecordAtNest(const NestRecordFile &file, const BoundNests &bou
   // Stage 3's tables (unmappedViews): a record VERIFIED_NOT_MAPPED only because the research
   // proposed no closed form for some view; the lowering then reads those views off the nest
   // itself, over its whole static domain.
-  bool viewsUnmapped = false, outputMayCollide = false, outputGathered = false;
+  bool viewsUnmapped = false, outputMayCollide = false, outputGathered = false, pointwise = false;
+  // exp/k-scatter: a pointwise family, P the three loops and I, J, K empty.
+  if (unmappedViews && *status == "VERIFIED_NOT_MAPPED")
+    if (const json::Object *g = record->getObject("gemm"))
+      if (const json::Object *ax = g->getObject("axes")) {
+        const json::Array *p = ax->getArray("P");
+        pointwise = p && p->size() == 3;
+        for (const char *name : {"I", "J", "K"}) {
+          const json::Array *list = ax->getArray(name);
+          pointwise = pointwise && list && list->empty();
+        }
+      }
   if (unmappedViews && *status == "VERIFIED_NOT_MAPPED" && !refusals->empty()) {
     viewsUnmapped = true;
     for (const json::Value &value : *refusals) {
       std::optional<StringRef> text = value.getAsString();
       if (text && isUnmappedViewRefusal(*text))
+        continue;
+      // exp/k-scatter: what a pointwise family says of itself, which only the product
+      // scatter-add takes.
+      if (pointwise && text &&
+          (text->starts_with("the coordinates I, J and K are not verified over the scope") ||
+           text->starts_with("the family has a batch coordinate (axis P)") ||
+           (text->starts_with("axis ") && text->ends_with(" has 0 levels, and a box has one")) ||
+           text->contains("(axis P), which is no role of ")))
         continue;
       // exp/general-scatter: what only the scatter-add takes.
       if (text && text->starts_with("two logical outputs may share a cell of C")) {
@@ -358,7 +377,7 @@ RecordAtNest checkRecordAtNest(const NestRecordFile &file, const BoundNests &bou
       viewsUnmapped = false;
     }
     if (!viewsUnmapped)
-      outputMayCollide = outputGathered = false;
+      outputMayCollide = outputGathered = pointwise = false;
   }
   if (*status != "VERIFIED" && !viewsUnmapped) {
     std::string first;
@@ -386,7 +405,18 @@ RecordAtNest checkRecordAtNest(const NestRecordFile &file, const BoundNests &bou
   std::optional<StringRef> holdsFor = fields.string(*theorem, "holds_for", "gemm.tiers.theorem13");
   if (!t13Status || !t13Tier || !t13Logical || !holdsFor)
     return refuse("");
-  if (*t13Status != "VERIFIED" || *t13Tier != "SYMBOLIC" || *t13Logical != "SYMBOLIC")
+  if (pointwise && viewsUnmapped && *t13Status == "VERIFIED" && *t13Tier == "SYMBOLIC") {
+    // The logical tier speaks of an I, J, K decomposition, which a pointwise family has not;
+    // the product scatter-add needs the fold over every event, in order, each once.
+    const json::Object *domain = tiers->getObject("domain");
+    const json::Object *sym = domain ? domain->getObject("symbolic") : nullptr;
+    std::optional<StringRef> dStatus = sym ? sym->getString("status") : std::nullopt;
+    std::optional<StringRef> dMult = sym ? sym->getString("multiplicity") : std::nullopt;
+    std::optional<bool> dExact = sym ? sym->getBoolean("exact_order") : std::nullopt;
+    if (!dStatus || *dStatus != "VERIFIED" || !dMult || *dMult != "UNIT" || !dExact || !*dExact)
+      return refuse("the record's family is pointwise, and its domain is not verified exact and of unit "
+                    "multiplicity at the symbolic tier");
+  } else if (*t13Status != "VERIFIED" || *t13Tier != "SYMBOLIC" || *t13Logical != "SYMBOLIC")
     return refuse("the record's Theorem 13 is " + *t13Status + " at " + *t13Tier + ", logical tier " + *t13Logical +
                   ", and a record is read only when all three are VERIFIED at SYMBOLIC");
   const json::Object *frame = fields.object(*gemm, "frame", "gemm");
@@ -397,7 +427,7 @@ RecordAtNest checkRecordAtNest(const NestRecordFile &file, const BoundNests &bou
     return refuse("");
   if (*otherWrites != 0)
     return refuse("the record says the nest writes memory outside the multiply-accumulate");
-  if (!*box || *guard != "true")
+  if ((!*box && !(pointwise && viewsUnmapped)) || *guard != "true")
     return refuse("the record's domain is no box");
 
   out.usable = true;
@@ -412,6 +442,7 @@ RecordAtNest checkRecordAtNest(const NestRecordFile &file, const BoundNests &bou
   out.viewsUnmapped = viewsUnmapped;
   out.outputMayCollide = outputMayCollide;
   out.outputGathered = outputGathered;
+  out.pointwise = pointwise && viewsUnmapped;
   return out;
 }
 

@@ -200,9 +200,7 @@ DomainResult analyzeDomains(const SemanticProgram &program, const TerminationCer
     group.search = found.status;
     group.searchReason = found.reason;
     unsigned taken = 0;
-    for (const VerifiedCandidate &candidate : found.candidates) {
-      if (taken++ >= request.maxCandidates)
-        break;
+    auto process = [&](const VerifiedCandidate &candidate) {
       CandidateDomain entry;
       // A segmented request carries its families in its segments; a family given with
       // --segments only tells the proposer which loop variables are logical.
@@ -282,6 +280,42 @@ DomainResult analyzeDomains(const SemanticProgram &program, const TerminationCer
         entry.verdict = checkReduction(program, use, out.enumeration, found.group,
                                        entry.family, order, *entry.request, request.domain, backend);
       group.candidates.push_back(std::move(entry));
+    };
+    for (const VerifiedCandidate &candidate : found.candidates) {
+      if (taken++ >= request.maxCandidates)
+        break;
+      process(candidate);
+    }
+    // Experimental (exp/k-scatter): the pointwise family, when no candidate's fold is verified
+    // at the symbolic tier with a symbolic logical tier.
+    bool logical = false;
+    for (const CandidateDomain &entry : group.candidates)
+      logical = logical || (entry.verdict.status() == ComputationStatus::Verified &&
+                            entry.verdict.tier() == ComputationTier::Symbolic &&
+                            entry.verdict.logicalTier() == ComputationTier::Symbolic);
+    if (request.pointwiseFallback && !request.segmented && !logical &&
+        found.group < out.enumeration.groups.size() &&
+        out.enumeration.groups[found.group].unsupported.empty()) {
+      // The sites' coordinates (the state their indices read), those independent of memory;
+      // the loop counters when the model marks them.
+      std::set<unsigned> counters, marked;
+      std::vector<bool> independent = memoryIndependentState(program);
+      for (unsigned site : out.enumeration.groups[found.group].sites)
+        for (unsigned id : program.sites[site].coordinates)
+          if (independent[id] && program.state[id].sort.kind == Sort::BV) {
+            counters.insert(id);
+            if (program.state[id].kind == StateVar::IterationCounter)
+              marked.insert(id);
+          }
+      if (!marked.empty())
+        counters = marked;
+      if (!counters.empty()) {
+        VerifiedCandidate pointwise;
+        pointwise.family.origin = "pointwise: P = the loop counters";
+        for (unsigned id : counters)
+          pointwise.family.axes[0].push_back(program.terms->state(id, program.state[id].sort));
+        process(pointwise);
+      }
     }
     out.groups.push_back(std::move(group));
   }

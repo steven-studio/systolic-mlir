@@ -504,3 +504,71 @@ exactly M times, and gcd(a, M) = 1.
 - Not every integer expression can be verified: the research's grammar and solver limits
   apply. A nest it does not verify stays on the host.
 
+
+## Experimental: outputs whose address reads k (2026-11-21)
+
+Covered: `C[φ(i, j, k)][…] += A[i][k] * B[k][j]` for any deterministic integer expression φ the
+front end takes. That includes polynomials (`i * i + k`), higher powers, division and remainder
+(`(i * i * i + 2 * k) % 16`), bit operations, `?:`, and tables read at any depth (`dp[i + k]`).
+It is on by default, with the scatter-add (`--no-general-scatter` turns both off).
+
+**What changes when φ reads k.** The products of one (i, j) no longer meet in one cell, so k is
+no longer only a reduction axis. A tile that sums over k into one cell cannot run such a nest.
+Two rewrites that would make it a dense GEMM are refused because they are not sound:
+
+- Pre-summing A's rows by bucket uses distributivity, `Σᵢ aᵢ b = (Σᵢ aᵢ) b`. The program's
+  `reassoc` does not permit that; LLVM factors only with `reassoc` and `nsz`.
+- Padding with zeros adds `0 * Inf = NaN` where the program has no such product.
+
+The lowering instead computes exactly the program's products, each once, and reassociates
+only the sums.
+
+**Research.** G3b needs C's view to be a function of (P, I, J). For these nests the family is
+P = (i, j, k), with I, J and K empty: a batch of rank-1 products. The search, which prefers
+I, J and K, does not propose it. With `--admit-gather`, `DomainAnalysisRequest::pointwiseFallback`
+adds the pointwise family (P = the group's loop counters). It is added only when no
+candidate has its fold verified at the symbolic tier with a symbolic logical tier, so every
+other record is unchanged. Its checkers prove:
+
+- G4a over the scope;
+- D1 to D3, with exact order and unit multiplicity;
+- Theorem 13 at the symbolic tier.
+
+The logical tier stays PROPOSED, because it speaks of an I, J and K decomposition. NestRecord
+picks a candidate in this order: first one with a symbolic logical tier, then one with an
+exact unit domain, then one with a verified fold.
+
+**Gate and lowering.**
+
+- A pointwise record (P three levels, I, J and K empty) is taken only by the product
+  scatter-add. That needs Theorem 13 VERIFIED at SYMBOLIC and the domain VERIFIED, exact and
+  UNIT at SYMBOLIC. Its own refusals (no I, J, K decomposition, a batch axis, roles of P) are
+  accepted.
+- The roles come from the nest: K is the loop A and B both read, I the other loop of A, J the
+  other loop of B. A and B must be affine.
+- At run time, every target of (i, j, k) and every table index is checked, as for the
+  scatter-add.
+- When all are inside: A and B are packed. For each k, the tiles of the K = 1 GEMM of A's
+  column k and B's row k write `products[k]` (the plan of M x N x 1, K times, announced as
+  `regions × K`).
+- `bucket_offsets` (count and prefix sum) and `sorted_src_idx` over the sources (k, i, j) add
+  every product into its cell, in source order, each cell written once.
+- Otherwise the nest runs as written. The shim checks the targets, by the C text of φ over
+  the counters it reads (i and k), before the kernel runs.
+
+**Validation.**
+
+- `test/SystolicCC/generalized_k_scatter.c`, bit for bit:
+  - `C[i * i + k][j]` and `C[(i * i * i + 2 * k) % 16][j]` (no table), and `C[dp[i + k]][j]`
+    (a table with repeated targets): 12 tile invocations each, and FPGA Executed with the mock
+    hardware;
+  - a target past C's bound: sent to the CPU by the shim.
+- Outside systolic-cc, the kernel's own fallback: 0 invocations, and the result right.
+
+**Limits.**
+
+- The array runs M × N × K multiply-accumulates in K rank-1 GEMMs, so its use is poor next to
+  a dense GEMM of the same size. The reduction runs on the host.
+- The products buffer is K × M × N.
+- φ must not read memory that the nest writes.
+- A and B must be affine in (i, k) and (k, j).

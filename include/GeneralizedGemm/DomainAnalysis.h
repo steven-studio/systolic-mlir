@@ -31,6 +31,11 @@ struct DomainAnalysisRequest {
   DomainOptions domain;
   ProposalLimits proposal;
   unsigned maxCandidates = 2; // Per group, in the search's order.
+  // Experimental (exp/k-scatter): when no candidate of a group has its fold verified at the
+  // symbolic tier with a symbolic logical tier, one more: the pointwise family, P = the
+  // group's loop counters and I, J, K empty, which G3b's doc notes is valid for any program.
+  // Its checkers prove the fold of C[h(e)] += A[f(e)] * B[g(e)] over the events e, with h a
+  // function of all the counters (C[i * i + k][j]). Off by default.
   // A family given from outside, in place of the search: one candidate per group, with
   // no coordinate order. For tests and oracles that want a repeat loop outside the
   // family. A proposal like any other: the checkers judge it.
@@ -50,6 +55,7 @@ struct DomainAnalysisRequest {
   // writes guards, bounds and views over levels; the checkers judge them as any
   // proposal. Off by default, and then nothing in the output changes.
   bool closedFormViews = false;
+  bool pointwiseFallback = false;
   ClosedFormOptions closedForms;
   // Section 14: identities from proved index invariants (IndexInvariantSynthesis.h),
   // handed to the proposer beside the ones above, so that a view can be written over
