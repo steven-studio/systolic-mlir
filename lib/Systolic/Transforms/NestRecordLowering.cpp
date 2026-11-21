@@ -1298,8 +1298,16 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
         for (AffineExpr expr : a.map.getResults())
           f.push_back(forms.ofExpr(expr, a.map.getNumDims(), a.operands));
       } else {
-        for (Value v : a.operands)
+        for (Value v : a.operands) {
+          // exp/gather-kscatter: a gathered index, A[dpA[i]][k], reads its table's index's loops.
+          if (auto found = gatherValues.find(v); found != gatherValues.end()) {
+            const Access &t = found->second.access;
+            f.push_back(t.map ? forms.ofExpr(t.map.getResult(0), t.map.getNumDims(), t.operands)
+                              : forms.of(t.operands[0]));
+            continue;
+          }
           f.push_back(forms.of(v));
+        }
       }
       for (const std::optional<Form> &one : f) {
         if (!one)
@@ -1775,6 +1783,28 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
       pack.clear();
       for (unsigned d = 0; d < f.size(); ++d) {
         DrivenOperand::DrivenGather one;
+        // exp/gather-kscatter: a gathered index, A[dpA[i]][k] or B[k][dpB[j]], packed as the
+        // gather path packs it: the table read at an affine form of the operand's roles, inside
+        // the table; the rows it gives are the program's own, checked by the shim.
+        auto found = access[x].map ? gatherValues.end() : gatherValues.find(access[x].operands[d]);
+        if (found != gatherValues.end()) {
+          const Access &t = found->second.access;
+          auto tableType = dyn_cast<MemRefType>(t.memref.getType());
+          std::optional<Form> index = t.map ? forms.ofExpr(t.map.getResult(0), t.map.getNumDims(), t.operands)
+                                            : forms.of(t.operands[0]);
+          if (!tableType || !tableType.hasStaticShape() || tableType.getRank() != 1 || !index ||
+              !overRoles(x, *index, one.coefficient, one.base) ||
+              !inside(x, one.coefficient, one.base, tableType.getDimSize(0))) {
+            problem = std::string("dimension ") + std::to_string(d) + " of " + kOperandName[x] +
+                      " gathers at no affine form of its roles inside its table";
+            return false;
+          }
+          one.gathered = true;
+          one.table = t.memref;
+          one.zeroExtend = found->second.zeroExtend;
+          pack.push_back(one);
+          continue;
+        }
         if (!f[d] || !overRoles(x, *f[d], one.coefficient, one.base)) {
           problem = std::string("dimension ") + std::to_string(d) + " of " + kOperandName[x] +
                     " is no affine form of its roles";
@@ -2018,7 +2048,8 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
                     (readsTable ? " through read-only tables" : "") +
                     (at.outputMayCollide ? ", with collisions" : "") +
                     ", every index checked before a write, a two-layer inverse map (bucket offsets, "
-                    "sources sorted by cell of C), each cell of C written once";
+                    "sources sorted by cell of C), each cell of C written once" +
+                    (gatherValues.empty() ? "" : "; A or B packed by its gather");
       return out;
     }
   }

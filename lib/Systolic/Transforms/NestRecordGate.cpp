@@ -363,7 +363,10 @@ RecordAtNest checkRecordAtNest(const NestRecordFile &file, const BoundNests &bou
           (text->starts_with("the coordinates I, J and K are not verified over the scope") ||
            text->starts_with("the family has a batch coordinate (axis P)") ||
            (text->starts_with("axis ") && text->ends_with(" has 0 levels, and a box has one")) ||
-           text->contains("(axis P), which is no role of ")))
+           text->contains("(axis P), which is no role of ") ||
+           // exp/gather-kscatter: A or B gathered (A[dpA[i]][k]); the lowering reads the
+           // gather off the nest and packs it.
+           (text->starts_with("dimension ") && text->contains(" gathers at "))))
         continue;
       // exp/general-scatter: what only the scatter-add takes.
       if (text && text->starts_with("two logical outputs may share a cell of C")) {

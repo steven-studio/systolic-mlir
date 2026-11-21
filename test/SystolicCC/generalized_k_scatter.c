@@ -13,6 +13,11 @@
 //   k_square   C[i * i + k][j]               a polynomial, with collisions
 //   k_cubic    C[(i * i * i + 2 * k) % 16][j] a cubic modulo 16, with collisions
 //   k_lookup   C[dp[i + k]][j]               a table read at i + k, with repeated targets
+//   k_gather_a C[i * i + k][j] += A[dpA[i]][k] * B[k][j]   A gathered as well
+//   k_gather_b C[i * i + k][j] += A[i][k] * B[k][dpB[j]]   B gathered as well
+//
+// A gathered input is packed first, A_packed[i][k] = A[dpA[i]][k], as the gather path packs it;
+// the shim checks dpA's entries against A's bound as it does for every gather.
 //
 // Inputs/generalized_k_scatter.json is the records file systolic-cc writes for this file
 // (PROGRAM.systolic/10-nest-records.json) when it runs generalized-gemm-nest-report itself;
@@ -22,6 +27,8 @@
 // PLAN-DAG: generalized_k_scatter.c:[[#]]:1: note: 'k_square' is offloaded: 12 systolic tile invocation(s)
 // PLAN-DAG: generalized_k_scatter.c:[[#]]:1: note: 'k_cubic' is offloaded: 12 systolic tile invocation(s)
 // PLAN-DAG: generalized_k_scatter.c:[[#]]:1: note: 'k_lookup' is offloaded: 12 systolic tile invocation(s)
+// PLAN-DAG: generalized_k_scatter.c:[[#]]:1: note: 'k_gather_a' is offloaded: 12 systolic tile invocation(s)
+// PLAN-DAG: generalized_k_scatter.c:[[#]]:1: note: 'k_gather_b' is offloaded: 12 systolic tile invocation(s)
 // RUN: %t | FileCheck %s --check-prefix=OUT
 // RUN: env SOFT_RUNTIME_MOCK_HARDWARE=1 %t | FileCheck %s --check-prefix=MOCK
 // RUN: FileCheck %s --check-prefix=REMARKS --input-file=%t.systolic/20-remarks.txt
@@ -37,6 +44,12 @@
 // OUT-NEXT: lookup mismatches: 0 of 512
 // OUT-NEXT: [systolic-cc] CPU Executed: GEMM #4
 // OUT-NEXT: lookup out of range mismatches: 0 of 512
+// OUT-NEXT: [systolic-cc] CPU Executed: GEMM #5
+// OUT-NEXT: gather A mismatches: 0 of 512
+// OUT-NEXT: [systolic-cc] CPU Executed: GEMM #6
+// OUT-NEXT: gather B mismatches: 0 of 512
+// OUT-NEXT: [systolic-cc] CPU Executed: GEMM #7
+// OUT-NEXT: gather A out of range mismatches: 0 of 512
 // MOCK: [systolic-cc] FPGA Executed: GEMM #1
 // MOCK-NEXT: square mismatches: 0 of 512
 // MOCK-NEXT: [systolic-cc] FPGA Executed: GEMM #2
@@ -45,9 +58,17 @@
 // MOCK-NEXT: lookup mismatches: 0 of 512
 // MOCK-NEXT: [systolic-cc] CPU Executed: GEMM #4
 // MOCK-NEXT: lookup out of range mismatches: 0 of 512
+// MOCK-NEXT: [systolic-cc] FPGA Executed: GEMM #5
+// MOCK-NEXT: gather A mismatches: 0 of 512
+// MOCK-NEXT: [systolic-cc] FPGA Executed: GEMM #6
+// MOCK-NEXT: gather B mismatches: 0 of 512
+// MOCK-NEXT: [systolic-cc] CPU Executed: GEMM #7
+// MOCK-NEXT: gather A out of range mismatches: 0 of 512
 // REMARKS-DAG: remark: GEMM 8x8x12 of nest 0 of k_square{{.*}} lowered from its record as 12 exact region(s) (product scatter-add: every product A[i][k] * B[k][j] by a K = 1 GEMM per k, C's address of (i, j, k) re-emitted at run time, with collisions
 // REMARKS-DAG: remark: GEMM 8x8x12 of nest 0 of k_cubic{{.*}} lowered from its record as 12 exact region(s) (product scatter-add:
 // REMARKS-DAG: remark: GEMM 8x8x12 of nest 0 of k_lookup{{.*}} lowered from its record as 12 exact region(s) (product scatter-add: {{.*}} through read-only tables, with collisions
+// REMARKS-DAG: remark: GEMM 8x8x12 of nest 0 of k_gather_a{{.*}} lowered from its record as 12 exact region(s) (product scatter-add: {{.*}}; A or B packed by its gather)
+// REMARKS-DAG: remark: GEMM 8x8x12 of nest 0 of k_gather_b{{.*}} lowered from its record as 12 exact region(s) (product scatter-add: {{.*}}; A or B packed by its gather)
 
 /* GEMM-like nests whose output row reads k. main checks each against a
    host loop on a 64-row C: rows the program does not write stay as they
@@ -79,7 +100,24 @@ void k_lookup(float A[restrict 8][12], const int32_t dp[restrict 32],
         C[dp[i + k]][j] += A[i][k] * B[k][j];
 }
 
+void k_gather_a(float A[restrict 16][12], const int32_t dpA[restrict 8],
+                float B[restrict 12][8], float C[restrict 64][8]) {
+  for (int i = 0; i < 8; ++i)
+    for (int j = 0; j < 8; ++j)
+      for (int k = 0; k < 12; ++k)
+        C[i * i + k][j] += A[dpA[i]][k] * B[k][j];
+}
+
+void k_gather_b(float A[restrict 8][12], float B[restrict 12][16],
+                const int32_t dpB[restrict 8], float C[restrict 64][8]) {
+  for (int i = 0; i < 8; ++i)
+    for (int j = 0; j < 8; ++j)
+      for (int k = 0; k < 12; ++k)
+        C[i * i + k][j] += A[i][k] * B[k][dpB[j]];
+}
+
 static float A[8][12], B[12][8], C[64][8], R[64][8];
+static float GA[32][12], GB[12][16];
 
 static void reset(void) {
   for (int r = 0; r < 64; ++r)
@@ -152,5 +190,45 @@ int main(void) {
         R[dp[i + k]][j] += A[i][k] * b;
       }
   bad += compare("lookup out of range");
+
+  /* gathered inputs: rows of a 16-row A, columns of a 16-column B, with repeats */
+  for (int r = 0; r < 32; ++r)
+    for (int k = 0; k < 12; ++k)
+      GA[r][k] = (float)((r * 5 + k * 7) % 9 - 4);
+  for (int k = 0; k < 12; ++k)
+    for (int c = 0; c < 16; ++c)
+      GB[k][c] = (float)((k * 3 + c * 5) % 7 - 3);
+  int32_t dpA[8] = {3, 3, 15, 0, 7, 7, 12, 1}, dpB[8] = {15, 0, 0, 9, 4, 4, 11, 2};
+  reset();
+  k_gather_a(GA, dpA, B, C);
+  for (int i = 0; i < 8; ++i)
+    for (int j = 0; j < 8; ++j)
+      for (int k = 0; k < 12; ++k) {
+        const float b = B[k][j];
+        R[i * i + k][j] += GA[dpA[i]][k] * b;
+      }
+  bad += compare("gather A");
+
+  reset();
+  k_gather_b(A, GB, dpB, C);
+  for (int i = 0; i < 8; ++i)
+    for (int j = 0; j < 8; ++j)
+      for (int k = 0; k < 12; ++k) {
+        const float a = A[i][k];
+        R[i * i + k][j] += a * GB[k][dpB[j]];
+      }
+  bad += compare("gather B");
+
+  /* a row of A past the bound written: row 20 of the caller's 32 */
+  dpA[4] = 20;
+  reset();
+  k_gather_a(GA, dpA, B, C);
+  for (int i = 0; i < 8; ++i)
+    for (int j = 0; j < 8; ++j)
+      for (int k = 0; k < 12; ++k) {
+        const float b = B[k][j];
+        R[i * i + k][j] += GA[dpA[i]][k] * b;
+      }
+  bad += compare("gather A out of range");
   return bad != 0;
 }

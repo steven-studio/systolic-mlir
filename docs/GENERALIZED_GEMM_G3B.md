@@ -572,3 +572,21 @@ exact unit domain, then one with a verified fold.
 - The products buffer is K × M × N.
 - φ must not read memory that the nest writes.
 - A and B must be affine in (i, k) and (k, j).
+
+**Gathered inputs with an output that reads k (2026-11-21).** The product scatter-add also
+takes A or B gathered by one level, `C[i * i + k][j] += A[dpA[i]][k] * B[k][j]` or
+`… * B[k][dpB[j]]`. It reuses the gather path:
+
+- The research verifies the nest over the pointwise family. The refusals for a gathered view
+  of A or B on P are accepted for pointwise records only.
+- The lowering reads the gather off the nest: a read-only one-dimensional table at an affine
+  form of the operand's roles, inside the table. It packs the operand as
+  `materializeGatherPack` packs every gather, `A_packed[i][k] = A[dpA[i]][k]`, before the
+  K = 1 GEMMs and the two-layer CSR.
+- The shim checks dpA's entries against A's bound, as for every gather, and C's targets
+  against C's bound. Either check failing sends the call to the CPU.
+- The front end (`--gather-subscripts`) now takes the gather in any one dimension. An inner
+  dimension's extent is C's type, so `B[k][dpB[j]]` needs no literal bound; a gathered row
+  still needs one.
+- `generalized_k_scatter.c` checks, bit for bit, both gathers and a row of A past A's bound,
+  which the shim sends to the CPU.

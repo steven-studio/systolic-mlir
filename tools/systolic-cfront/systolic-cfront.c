@@ -632,6 +632,7 @@ typedef struct {
      table's C name and its declarator's id, and the leading extent (the
      literal bound written). The leading dimension then has no range. */
   int gathered;
+  int gather_dim;              /* the dimension gathered (0: the rows) */
   const char *gather_table, *gather_table_decl;
   long long gather_extent;
   /* --scatter-subscripts: written at a general subscript; the interface's
@@ -666,7 +667,8 @@ typedef struct {
     env_entry *table;
     char *table_index;           /* E, affine text */
     int count;                   /* the array's rank */
-    linear_form forms[MAX_RANK]; /* the other subscripts' forms (d >= 1) */
+    int dim;                     /* the gathered dimension */
+    linear_form forms[MAX_RANK]; /* the other subscripts' forms */
   } gather;
 
   env_entry *env;
@@ -1982,12 +1984,13 @@ static env_entry *array_access(translator *tr, const json_value *node,
   const json_value *operands[MAX_RANK];
   /* --gather-subscripts: the leading subscript is T[E] (gather_table_of) */
   int gathered = 0;
+  size_t gdim = 0;   /* the gathered dimension: any one (B[k][dpB[j]] too) */
   env_entry *table = NULL;
   char *table_index = NULL;
   tr->in_subscript = 1;   /* a signed integer parameter is a symbol here */
   for (size_t d = 0; d < count; ++d) {   /* outermost subscript first */
     const json_value *ix = indices[count - 1 - d];
-    if (d == 0 && tr->gather_subscripts && !tr->in_gather) {
+    if (!gathered && tr->gather_subscripts && !tr->in_gather) {
       const json_value *t = strip_parens_and_casts(ix, kIndexCasts);
       const json_value *tbase = NULL;
       if (strcmp(kind_of(t), "ArraySubscriptExpr") == 0)
@@ -1999,7 +2002,9 @@ static env_entry *array_access(translator *tr, const json_value *node,
         if (written)
           unsupported(ix, "a gathered subscript in an array that is written; "
                           "the stores stay affine");
-        if (!tr->static_extents || e->declared_extent <= 0)
+        /* A gathered row needs the leading bound written as a literal; an
+           inner dimension's extent is C's type. */
+        if (d == 0 && (!tr->static_extents || e->declared_extent <= 0))
           unsupported(node, "'%s' is read at a gathered row, and its leading "
                             "bound is not written as an integer literal "
                             "(float %s[32][...])",
@@ -2014,9 +2019,10 @@ static env_entry *array_access(translator *tr, const json_value *node,
         tr->in_gather = 0;
         tr->in_subscript = 1;
         gathered = 1;
-        memset(&forms[0], 0, sizeof forms[0]);
-        operands[0] = NULL;
-        texts[0] = xstrdup("@@gather@@");
+        gdim = d;
+        memset(&forms[d], 0, sizeof forms[d]);
+        operands[d] = NULL;
+        texts[d] = xstrdup("@@gather@@");
         continue;
       }
     }
@@ -2042,7 +2048,7 @@ static env_entry *array_access(translator *tr, const json_value *node,
      value -- the ranges of those nodes are computed with the subscripts'. */
   header_nodes sub = {0};
   for (size_t d = 0; d < count; ++d) {
-    if (gathered && d == 0)
+    if (gathered && d == gdim)
       continue;
     if (gathered && (mods[d] || form_has_symbol(tr, &forms[d])))
       unsupported(operands[d], "a subscript beside a gathered one reads a "
@@ -2129,10 +2135,12 @@ static env_entry *array_access(translator *tr, const json_value *node,
       unsupported(node, "'%s' is gathered by two tables",
                   referenced_name(base));
     info->gathered = 1;
+    info->gather_dim = (int)gdim;
     info->gather_table_decl = table->decl;
     info->gather_table = table->cname;
-    info->gather_extent = e->declared_extent;
+    info->gather_extent = gdim == 0 ? e->declared_extent : e->inner_dims[gdim - 1];
     tr->gather.active = 1;
+    tr->gather.dim = (int)gdim;
     tr->gather.table = table;
     tr->gather.table_index = table_index;
     tr->gather.count = (int)count;
@@ -2140,7 +2148,9 @@ static env_entry *array_access(translator *tr, const json_value *node,
       tr->gather.forms[d] = forms[d];
   }
   long long lo[MAX_RANK], hi[MAX_RANK];
-  int all = reached && !gathered;
+  /* A gathered row gives the leading dimension no range; a gathered inner
+     dimension leaves the leading one's as it is. */
+  int all = reached && !(gathered && gdim == 0);
   for (size_t d = 0; d < count; ++d) {
     all = all && found[d];
     if (found[d]) {
@@ -2352,8 +2362,14 @@ static char *load(translator *tr, const json_value *node, int indent,
   char *row = fresh(tr);
   emit(tr, indent, "%s = arith.index_cast%s %s : %s to index %s", row,
        t->is_signed ? "" : "ui", raw, t->elem, loc_text(tr, node));
-  char *list = xstrdup(row);
-  for (int d = 1; d < tr->gather.count; ++d) {
+  char *list = NULL;
+  for (int d = 0; d < tr->gather.count; ++d) {
+    if (d == tr->gather.dim) {
+      char *joined = list ? format("%s, %s", list, row) : xstrdup(row);
+      free(list);
+      list = joined;
+      continue;
+    }
     const linear_form *f = &tr->gather.forms[d];
     char *v = NULL;
     if (f->n == 1 && f->coef[0] == 1 && f->constant == 0) {
@@ -2371,7 +2387,7 @@ static char *load(translator *tr, const json_value *node, int indent,
              loc_text(tr, node));
       free(b);
     }
-    char *joined = format("%s, %s", list, v);
+    char *joined = list ? format("%s, %s", list, v) : xstrdup(v);
     free(list);
     free(v);
     list = joined;
@@ -3837,7 +3853,7 @@ static void interface(translator *tr, const json_value *fn,
       int ranges = info && info->has_ranges;
       long long extent = ranges ? info->hi[0] + 1 : 0;
       long long minimum = ranges ? info->lo[0] : 0;
-      if (info && info->gathered) {
+      if (info && info->gathered && info->gather_dim == 0) {
         /* The rows a gather reads are checked by the shim against this. */
         if (extent < info->gather_extent)
           extent = info->gather_extent;
@@ -3921,7 +3937,7 @@ static void static_extent_types(translator *tr, size_t first_line) {
       if (strcmp(tr->accesses[a].decl, e->decl) == 0)
         info = &tr->accesses[a];
     char *type;
-    if (info && info->gathered) {
+    if (info && info->gathered && info->gather_dim == 0) {
       /* The literal bound written; any affine access must stay inside it. */
       long long ext = info->gather_extent;
       if (!info->has_ranges ||
