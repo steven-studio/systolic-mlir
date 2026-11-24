@@ -41,6 +41,10 @@ enum class UnknownReason {
   /// The tableau would pass WorkLimits::maxTableauCells, or the session would
   /// pass WorkLimits::maxSessionCells.
   TableauLimit,
+  /// The integer search reached WorkLimits::maxBranchNodes.
+  NodeLimit,
+  /// The integer search would pass WorkLimits::maxSearchCells.
+  MemoryLimit,
   /// The solver produced an answer and the checker refused it, or the lattice
   /// step failed its determinant check. Either is a solver bug, reported as
   /// Unknown because the answer cannot be trusted.

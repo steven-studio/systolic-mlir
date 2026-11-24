@@ -17,17 +17,21 @@ static bool admitDelta(WorkMeter &meter, const DeltaRational &value) {
 
 BoundsTableau::BoundsTableau(unsigned numStructural)
     : structural(numStructural) {
-  forms.reserve(numStructural);
   for (unsigned j = 0; j < numStructural; ++j) {
-    std::vector<Int> unit(numStructural, Int(0));
-    unit[j] = Int(1);
-    forms.push_back(std::move(unit));
     nonbasic.push_back(j);
     places.push_back(Place{false, j});
   }
   values.resize(numStructural);
   lowers.resize(numStructural);
   uppers.resize(numStructural);
+}
+
+std::vector<Int> BoundsTableau::form(unsigned variable) const {
+  if (variable >= structural)
+    return slackForms[variable - structural];
+  std::vector<Int> unit(structural, Int(0));
+  unit[variable] = Int(1);
+  return unit;
 }
 
 std::optional<unsigned>
@@ -81,8 +85,8 @@ BoundsTableau::variableForForm(const std::vector<Int> &form, WorkMeter &meter) {
   if (!admitDelta(meter, value))
     return std::nullopt;
 
-  const unsigned variable = forms.size();
-  forms.push_back(form);
+  const unsigned variable = numVariables();
+  slackForms.push_back(form);
   known.emplace(form, variable);
   values.push_back(std::move(value));
   lowers.emplace_back();
@@ -340,7 +344,7 @@ BoundsTableau::StepOutcome BoundsTableau::step(WorkMeter &meter) {
 
 std::optional<std::vector<Rational>>
 BoundsTableau::concreteValues(WorkMeter &meter) const {
-  if (!meter.charge(2 * forms.size() + 1))
+  if (!meter.charge(2 * std::uint64_t(numVariables()) + 1))
     return std::nullopt;
   // low <= high holds in the delta order. It holds for a concrete epsilon when
   // epsilon * (low.delta - high.delta) <= high.real - low.real. That limits
@@ -356,7 +360,7 @@ BoundsTableau::concreteValues(WorkMeter &meter) const {
     if (room < epsilon)
       epsilon = room;
   };
-  for (unsigned v = 0; v < forms.size(); ++v) {
+  for (unsigned v = 0; v < numVariables(); ++v) {
     if (lowers[v])
       keepOrdered(lowers[v]->value, values[v]);
     if (uppers[v])
@@ -383,6 +387,9 @@ static void appendRef(std::string &text, const RowRef &ref) {
   case RowRef::Kind::Congruence:
     text += "cong";
     break;
+  case RowRef::Kind::Assumption:
+    text += "case";
+    break;
   }
   text += std::to_string(ref.index);
   text += ref.negated ? "-" : "+";
@@ -406,11 +413,11 @@ std::string BoundsTableau::stateText() const {
   std::string text = "tableau ";
   text += std::to_string(structural);
   text += ' ';
-  text += std::to_string(forms.size());
+  text += std::to_string(numVariables());
   text += " pivots ";
   text += std::to_string(pivots);
   text += '\n';
-  for (unsigned v = 0; v < forms.size(); ++v) {
+  for (unsigned v = 0; v < numVariables(); ++v) {
     text += places[v].isBasic ? "b " : "n ";
     text += std::to_string(v);
     text += " at ";
@@ -420,7 +427,7 @@ std::string BoundsTableau::stateText() const {
     appendBound(text, "lower", lowers[v]);
     appendBound(text, "upper", uppers[v]);
     text += " form";
-    for (const Int &c : forms[v]) {
+    for (const Int &c : form(v)) {
       text += ' ';
       text += toDecimal(c);
     }

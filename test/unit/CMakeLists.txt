@@ -79,3 +79,8 @@ target_link_libraries(exact-solver-test PRIVATE SystolicExact)
 add_executable(exact-rational-test ExactRationalTest.cpp)
 llvm_update_compile_flags(exact-rational-test)
 target_link_libraries(exact-rational-test PRIVATE SystolicExact)
+
+# The integer solver, on the same terms.
+add_executable(exact-integer-test ExactIntegerTest.cpp)
+llvm_update_compile_flags(exact-integer-test)
+target_link_libraries(exact-integer-test PRIVATE SystolicExact)

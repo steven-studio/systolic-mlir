@@ -3,6 +3,7 @@
 #include "Systolic/Exact/Session.h"
 #include "DecisionGate.h"
 #include "ExecutionCounters.h"
+#include "IntegerSearch.h"
 
 namespace systolic::exact {
 
@@ -28,6 +29,11 @@ struct Session::State {
   Status status = Status::Unchecked;
   std::optional<RationalWitness> witness;  // when Feasible
   std::optional<InfeasibilityProof> proof; // when Infeasible
+  /// The answer of checkInteger(), which is apart from the rational one.
+  Status integerStatus = Status::Unchecked;
+  std::optional<IntegerWitness> integerPoint; // when Feasible
+  std::optional<BranchProof> branchProof;     // when Infeasible
+  std::uint64_t proofCells = 0;               // what branchProof holds
 };
 
 const LinearExpr &Session::State::exprOf(const RowRef &ref) const {
@@ -39,6 +45,7 @@ const LinearExpr &Session::State::exprOf(const RowRef &ref) const {
   case RowRef::Kind::Equality:
     return system.equalities()[ref.index].expr;
   case RowRef::Kind::Congruence:
+  case RowRef::Kind::Assumption: // only a branch proof has one
     break;
   }
   return system.congruences()[ref.index].expr;
@@ -51,6 +58,10 @@ void Session::State::noteRow(const RowRef &ref) {
     status = Status::Unchecked;
     witness.reset();
   }
+  if (integerStatus == Status::Feasible) {
+    integerStatus = Status::Unchecked;
+    integerPoint.reset();
+  }
 }
 
 /// Tableau cells, and each variable and each row of the system as a row of
@@ -60,7 +71,7 @@ void Session::State::noteRow(const RowRef &ref) {
 std::uint64_t Session::State::size() const {
   const std::uint64_t width = system.numVariables();
   return tableau.rows().size() * width +
-         (tableau.numVariables() + system.numRows()) * (width + 8);
+         (tableau.numVariables() + system.numRows()) * (width + 8) + proofCells;
 }
 
 /// A row with no variables is true or false by its constant.
@@ -79,6 +90,7 @@ static RowOutcome applyConstant(RowRef ref, const Int &constant,
     ref.negated = constant > Int(0);
     break;
   case RowRef::Kind::Congruence:
+  case RowRef::Kind::Assumption: // only a branch proof has one
     break;
   }
   if (holds)
@@ -199,9 +211,19 @@ Session::State &Session::writable() {
   return *current;
 }
 
+/// Read before the row, and any copy it would cause, is allocated.
+bool Session::hasRoomForRow() const {
+  std::uint64_t needed = heldCells() + current->system.numVariables() + 8;
+  if (current.use_count() > 1)
+    needed += current->size();
+  return needed <= memoryLimit;
+}
+
 RowError Session::addInequality(LinearExpr expr) {
   if (expr.coefficients.size() != current->system.numVariables())
     return RowError::WrongCoefficientCount;
+  if (!hasRoomForRow())
+    return RowError::SessionLimit;
   State &state = writable();
   const RowError error = state.system.addInequality(std::move(expr));
   state.noteRow(RowRef{RowRef::Kind::Inequality,
@@ -212,6 +234,8 @@ RowError Session::addInequality(LinearExpr expr) {
 RowError Session::addStrictInequality(LinearExpr expr) {
   if (expr.coefficients.size() != current->system.numVariables())
     return RowError::WrongCoefficientCount;
+  if (!hasRoomForRow())
+    return RowError::SessionLimit;
   State &state = writable();
   const RowError error = state.system.addStrictInequality(std::move(expr));
   state.noteRow(RowRef{RowRef::Kind::StrictInequality,
@@ -222,10 +246,32 @@ RowError Session::addStrictInequality(LinearExpr expr) {
 RowError Session::addEquality(LinearExpr expr) {
   if (expr.coefficients.size() != current->system.numVariables())
     return RowError::WrongCoefficientCount;
+  if (!hasRoomForRow())
+    return RowError::SessionLimit;
   State &state = writable();
   const RowError error = state.system.addEquality(std::move(expr));
   state.noteRow(RowRef{RowRef::Kind::Equality,
                        state.system.equalities().size() - 1, false});
+  return error;
+}
+
+RowError Session::addCongruence(LinearExpr expr, Int modulus) {
+  if (expr.coefficients.size() != current->system.numVariables())
+    return RowError::WrongCoefficientCount;
+  if (modulus < Int(1))
+    return RowError::NonPositiveModulus;
+  if (!hasRoomForRow())
+    return RowError::SessionLimit;
+  State &state = writable();
+  const RowError error =
+      state.system.addCongruence(std::move(expr), std::move(modulus));
+  // A new quotient column changes the shape of a branch proof, so this one
+  // does not stay, even though a row can only make the system smaller. check()
+  // has no use for the row, so it is not pending.
+  state.integerStatus = Status::Unchecked;
+  state.integerPoint.reset();
+  state.branchProof.reset();
+  state.proofCells = 0;
   return error;
 }
 
@@ -259,15 +305,16 @@ Decision Session::check(const WorkLimits &limits,
   detail::noteExecution(detail::Stage::RationalCheck);
   detail::TableauFacts facts;
 
-  // An earlier answer still needs the checker, and no work.
-  if (current->status == Status::Feasible)
-    return detail::gateWitness(current->system, *current->witness, facts);
-  if (current->status == Status::Infeasible)
-    return detail::gateProof(current->system, *current->proof, facts);
-
   const System &rows = current->system;
   if (!rows.congruences().empty())
     return detail::gateUnknown(rows, UnknownReason::UnsupportedConstruct, facts);
+
+  // An earlier answer still needs the checker, and no work.
+  if (current->status == Status::Feasible)
+    return detail::gateWitness(rows, *current->witness, facts);
+  if (current->status == Status::Infeasible)
+    return detail::gateProof(rows, *current->proof, facts);
+
   if (rows.numVariables() > limits.maxVariables)
     return detail::gateUnknown(rows, UnknownReason::VariableLimit, facts);
   if (rows.numRows() > limits.maxRows)
@@ -347,6 +394,57 @@ Decision Session::check(const WorkLimits &limits,
   return decision;
 }
 
+Decision Session::checkInteger(const WorkLimits &limits,
+                               CancellationToken *cancellation) {
+  detail::noteExecution(detail::Stage::IntegerCheck);
+  detail::SearchFacts facts;
+  const System &rows = current->system;
+
+  // An earlier answer still needs the checker, and no work.
+  if (current->integerStatus == Status::Feasible)
+    return detail::gateIntegerWitness(rows, *current->integerPoint, facts);
+  if (current->integerStatus == Status::Infeasible)
+    return detail::gateBranchProof(rows, *current->branchProof, facts);
+
+  const std::uint64_t columns =
+      std::uint64_t(rows.numVariables()) + rows.congruences().size();
+  if (columns > limits.maxVariables)
+    return detail::gateIntegerUnknown(rows, UnknownReason::VariableLimit, facts);
+  if (rows.numRows() > limits.maxRows)
+    return detail::gateIntegerUnknown(rows, UnknownReason::RowLimit, facts);
+  // Keeping the answer may copy this state, so that is read first.
+  if (heldCells() + current->size() > limits.maxSessionCells)
+    return detail::gateIntegerUnknown(rows, UnknownReason::MemoryLimit, facts);
+
+  detail::SearchOutcome outcome =
+      detail::searchIntegerPoint(rows, limits, cancellation);
+  facts.steps = outcome.steps;
+  facts.pivots = outcome.pivots;
+  facts.nodes = outcome.nodes;
+  facts.ranTableau = outcome.ranTableau;
+  facts.ranSearch = outcome.nodes > 0;
+
+  if (outcome.kind == detail::SearchOutcome::Kind::Stopped)
+    return detail::gateIntegerUnknown(rows, outcome.reason, facts);
+  if (outcome.kind == detail::SearchOutcome::Kind::Feasible) {
+    Decision decision = detail::gateIntegerWitness(rows, outcome.witness, facts);
+    if (decision.provedFeasible()) {
+      State &state = writable();
+      state.integerStatus = Status::Feasible;
+      state.integerPoint = std::move(outcome.witness);
+    }
+    return decision;
+  }
+  Decision decision = detail::gateBranchProof(rows, outcome.proof, facts);
+  if (decision.provedInfeasible()) {
+    State &state = writable();
+    state.integerStatus = Status::Infeasible;
+    state.branchProof = std::move(outcome.proof);
+    state.proofCells = outcome.proofCells;
+  }
+  return decision;
+}
+
 std::string Session::stateText() const {
   const State &state = *current;
   std::string text = canonicalText(state.system);
@@ -372,6 +470,19 @@ std::string Session::stateText() const {
   }
   if (state.proof)
     text += canonicalText(*state.proof);
+  if (state.integerStatus != Status::Unchecked)
+    text += state.integerStatus == Status::Feasible ? "integer feasible\n"
+                                                    : "integer infeasible\n";
+  if (state.integerPoint) {
+    text += "integer witness";
+    for (const Int &value : state.integerPoint->values) {
+      text += ' ';
+      text += toDecimal(value);
+    }
+    text += '\n';
+  }
+  if (state.branchProof)
+    text += canonicalText(*state.branchProof);
   text += state.tableau.stateText();
   return text;
 }
@@ -379,6 +490,11 @@ std::string Session::stateText() const {
 Decision solveRational(const System &system, const WorkLimits &limits,
                        CancellationToken *cancellation) {
   return Session(system).check(limits, cancellation);
+}
+
+Decision solveInteger(const System &system, const WorkLimits &limits,
+                      CancellationToken *cancellation) {
+  return Session(system).checkInteger(limits, cancellation);
 }
 
 } // namespace systolic::exact

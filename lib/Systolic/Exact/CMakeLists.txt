@@ -10,6 +10,7 @@ add_library(SystolicExact STATIC
   Decide.cpp
   DeltaRational.cpp
   Int.cpp
+  IntegerSearch.cpp
   Lattice.cpp
   Normalize.cpp
   Provenance.cpp

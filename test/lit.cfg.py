@@ -88,5 +88,5 @@ if config.cfront_clang:
 
 tool_dirs = [config.systolic_tools_dir, config.llvm_tools_dir]
 tools = ["systolic-opt", "systolic-translate", "systolic-cost",
-         "exact-solver-test", "exact-rational-test"]
+         "exact-solver-test", "exact-rational-test", "exact-integer-test"]
 llvm_config.add_tool_substitutions(tools, tool_dirs)

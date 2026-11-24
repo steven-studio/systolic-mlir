@@ -50,8 +50,10 @@ struct BuildDeclaration {
   SolverImplementation implementation;
   /// The solver production uses. Unchanged by this library existing.
   SolverImplementation productionSolver;
-  /// The milestone this library implements.
+  /// The milestone of the rational solver this library implements.
   std::string solverRevision;
+  /// The milestone of its integer search, a later and separate part.
+  std::string integerRevision;
   /// SHA-256 of the text `sha256sum`, in sorted order, prints for
   /// include/Systolic/Exact/* and lib/Systolic/Exact/*, by repository path.
   std::string solverSourceSha256;
@@ -93,6 +95,10 @@ struct RuntimeEvidence {
   std::uint64_t rationalChecks = 0;
   /// Pivots of the project-owned tableau.
   std::uint64_t tableauPivots = 0;
+  /// Calls of Session::checkInteger(), the project-owned integer search.
+  std::uint64_t integerChecks = 0;
+  /// Nodes of that search.
+  std::uint64_t branchNodes = 0;
 };
 
 RuntimeEvidence runtimeEvidence();

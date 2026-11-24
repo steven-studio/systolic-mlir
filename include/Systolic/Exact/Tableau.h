@@ -102,7 +102,7 @@ public:
 
   // A read-only view, which the tests use to check the invariants from outside.
   unsigned numStructural() const { return structural; }
-  unsigned numVariables() const { return forms.size(); }
+  unsigned numVariables() const { return structural + slackForms.size(); }
   /// The basic variable of each row.
   const std::vector<unsigned> &basicVariables() const { return basic; }
   /// The nonbasic variable of each column.
@@ -118,9 +118,7 @@ public:
     return uppers[variable];
   }
   /// The definition of a variable over the structural variables.
-  const std::vector<Int> &form(unsigned variable) const {
-    return forms[variable];
-  }
+  std::vector<Int> form(unsigned variable) const;
   /// The pivot of the last step() that returned Pivoted: leaving, entering.
   std::optional<std::pair<unsigned, unsigned>> lastPivot() const {
     return latestPivot;
@@ -156,7 +154,9 @@ private:
   void addTerm(const Bound &bound, const Rational &multiplier);
 
   unsigned structural;
-  std::vector<std::vector<Int>> forms;        // by variable
+  /// By slack. A structural variable is a unit form, which is not stored: that
+  /// would be n squared integers before any limit had been read.
+  std::vector<std::vector<Int>> slackForms;
   std::map<std::vector<Int>, unsigned> known; // slack by form
   std::vector<DeltaRational> values;          // by variable
   std::vector<std::optional<Bound>> lowers;   // by variable

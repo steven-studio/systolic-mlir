@@ -18,6 +18,8 @@ enum class Stage {
   CheckRefused,
   RationalCheck,
   Pivot,
+  IntegerCheck,
+  BranchNode,
 };
 
 void noteExecution(Stage stage);

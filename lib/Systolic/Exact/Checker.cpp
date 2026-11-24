@@ -85,7 +85,8 @@ struct Row {
 
 /// The row a RowRef names, or std::nullopt when it names nothing usable.
 static std::optional<Row> inputRow(const System &system, const RowRef &ref,
-                                   std::size_t width) {
+                                   std::size_t width,
+                                   const std::vector<Row> *assumptions) {
   const std::size_t quotientBase = system.numVariables();
   const LinearExpr *expr = nullptr;
   Row row;
@@ -102,6 +103,10 @@ static std::optional<Row> inputRow(const System &system, const RowRef &ref,
     expr = &system.strictInequalities()[ref.index].expr;
     row.strict = true;
     break;
+  case RowRef::Kind::Assumption:
+    if (ref.negated || !assumptions || ref.index >= assumptions->size())
+      return std::nullopt;
+    return (*assumptions)[ref.index];
   case RowRef::Kind::Equality:
     if (ref.index >= system.equalities().size())
       return std::nullopt;
@@ -126,12 +131,15 @@ static std::optional<Row> inputRow(const System &system, const RowRef &ref,
   return row;
 }
 
-CheckResult checkInfeasibility(const System &system, Domain domain,
-                               const InfeasibilityProof &proof) {
+/// Why the steps do not derive a false row, or null when they do. `assumptions`
+/// are the rows assumed by the splits above this leaf, and may be null.
+static const char *derivationError(const System &system, Domain domain,
+                                   const InfeasibilityProof &proof,
+                                   const std::vector<Row> *assumptions) {
   if (domain == Domain::Rational && !system.congruences().empty())
-    return refuse("a congruence has no rational meaning");
+    return "a congruence has no rational meaning";
   if (proof.steps.empty())
-    return refuse("the proof has no steps");
+    return "the proof has no steps";
   const std::size_t width =
       system.numVariables() + system.congruences().size();
   std::vector<Row> rows;
@@ -140,21 +148,21 @@ CheckResult checkInfeasibility(const System &system, Domain domain,
     Row row;
     switch (step.rule) {
     case ProofStep::Rule::Input: {
-      std::optional<Row> named = inputRow(system, step.row, width);
+      std::optional<Row> named = inputRow(system, step.row, width, assumptions);
       if (!named)
-        return refuse("an input step names no usable row");
+        return "an input step names no usable row";
       row = std::move(*named);
       break;
     }
     case ProofStep::Rule::Combine:
       if (step.terms.empty())
-        return refuse("a combine step has no terms");
+        return "a combine step has no terms";
       row.coefficients.assign(width, Int(0));
       for (const ProofTerm &term : step.terms) {
         if (term.step >= rows.size())
-          return refuse("a combine step reads a later step");
+          return "a combine step reads a later step";
         if (term.multiplier <= Int(0))
-          return refuse("a combine step has a multiplier that is not positive");
+          return "a combine step has a multiplier that is not positive";
         const Row &read = rows[term.step];
         for (std::size_t j = 0; j < width; ++j)
           row.coefficients[j] += term.multiplier * read.coefficients[j];
@@ -164,19 +172,32 @@ CheckResult checkInfeasibility(const System &system, Domain domain,
       break;
     case ProofStep::Rule::Tighten: {
       if (domain != Domain::Integer)
-        return refuse("tightening is not valid over the rationals");
+        return "tightening is not valid over the rationals";
       if (step.source >= rows.size())
-        return refuse("a tighten step reads a later step");
+        return "a tighten step reads a later step";
       const Row &read = rows[step.source];
       if (read.strict)
-        return refuse("a tighten step reads a strict row");
+        return "a tighten step reads a strict row";
       const Int g = contentOf(read.coefficients);
       if (g == Int(0))
-        return refuse("a tighten step reads a row with no variables");
+        return "a tighten step reads a row with no variables";
       row.coefficients.reserve(width);
       for (const Int &c : read.coefficients)
         row.coefficients.push_back(*divFloor(c, g));
       row.constant = *divFloor(read.constant, g);
+      break;
+    }
+    case ProofStep::Rule::Harden: {
+      if (domain != Domain::Integer)
+        return "hardening is not valid over the rationals";
+      if (step.source >= rows.size())
+        return "a harden step reads a later step";
+      const Row &read = rows[step.source];
+      if (!read.strict)
+        return "a harden step reads a closed row";
+      row = read;
+      row.constant -= Int(1);
+      row.strict = false;
       break;
     }
     }
@@ -185,10 +206,81 @@ CheckResult checkInfeasibility(const System &system, Domain domain,
   const Row &last = rows.back();
   for (const Int &c : last.coefficients)
     if (c != Int(0))
-      return refuse("the last step still has variables");
+      return "the last step still has variables";
   if (last.constant > Int(0) || (last.constant == Int(0) && !last.strict))
-    return refuse("the last step is not a false row");
+    return "the last step is not a false row";
+  return nullptr;
+}
+
+CheckResult checkInfeasibility(const System &system, Domain domain,
+                               const InfeasibilityProof &proof) {
+  if (const char *why = derivationError(system, domain, proof, nullptr))
+    return refuse(why);
   return accept();
 }
+
+/// The row that one case of a split assumes.
+static Row assumedRow(const BranchNode &node, bool lowCase) {
+  Row row;
+  row.coefficients.reserve(node.form.size());
+  for (const Int &c : node.form)
+    row.coefficients.push_back(lowCase ? -c : c);
+  row.constant = lowCase ? node.bound : -node.bound - Int(1);
+  return row;
+}
+
+CheckResult checkBranchProof(const System &system, const BranchProof &proof) {
+  const std::size_t count = proof.nodes.size();
+  if (count == 0)
+    return refuse("the branch proof has no nodes");
+  const std::size_t width =
+      system.numVariables() + system.congruences().size();
+
+  struct Visit {
+    std::size_t node;
+    unsigned casesStarted;
+  };
+  std::vector<Visit> stack;
+  stack.push_back(Visit{0, 0});
+  std::vector<bool> reached(count, false);
+  reached[0] = true;
+  std::size_t numReached = 1;
+  std::vector<Row> assumptions;
+
+  while (!stack.empty()) {
+    const std::size_t index = stack.back().node;
+    const BranchNode &node = proof.nodes[index];
+    if (node.kind == BranchNode::Kind::Leaf) {
+      if (const char *why = derivationError(system, Domain::Integer, node.leaf,
+                                            &assumptions))
+        return refuse(why);
+      stack.pop_back();
+      continue;
+    }
+    if (node.form.size() != width)
+      return refuse("a split does not have one coefficient per column");
+    const unsigned started = stack.back().casesStarted;
+    if (started == 2) {
+      assumptions.pop_back();
+      stack.pop_back();
+      continue;
+    }
+    const std::size_t child = started == 0 ? node.low : node.high;
+    if (child >= count || reached[child])
+      return refuse("a split reads a node that is missing or already reached");
+    reached[child] = true;
+    ++numReached;
+    stack.back().casesStarted = started + 1;
+    if (started == 0)
+      assumptions.push_back(assumedRow(node, true));
+    else
+      assumptions.back() = assumedRow(node, false);
+    stack.push_back(Visit{child, 0});
+  }
+  if (numReached != count)
+    return refuse("a node of the proof is never reached");
+  return accept();
+}
+
 
 } // namespace systolic::exact

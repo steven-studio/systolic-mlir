@@ -46,6 +46,10 @@ const char *unknownReasonName(UnknownReason reason) {
     return "cancelled";
   case UnknownReason::TableauLimit:
     return "tableau-limit";
+  case UnknownReason::NodeLimit:
+    return "node-limit";
+  case UnknownReason::MemoryLimit:
+    return "memory-limit";
   case UnknownReason::CertificateRejected:
     return "certificate-rejected";
   }

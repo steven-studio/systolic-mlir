@@ -27,6 +27,7 @@ set(SYSTOLIC_TEST_DEPENDS
   systolic-cc
   exact-solver-test
   exact-rational-test
+  exact-integer-test
 )
 
 # An LLVM built in-tree (or the Debian llvm-*-tools packages) exports

@@ -51,6 +51,16 @@ struct DecisionMaker {
     return decision;
   }
 
+  static Decision infeasible(const System &system, BranchProof proof) {
+    if (!checkBranchProof(system, proof).accepted)
+      return rejected(Domain::Integer);
+    Decision decision;
+    decision.answer = Verdict::Infeasible;
+    decision.branchTree = std::move(proof);
+    decision.evidence.ranChecker = true;
+    return decision;
+  }
+
   static void seal(Decision &decision, const System &system, std::uint64_t steps,
                    bool ranLattice, bool ranNormalize) {
     decision.evidence.steps = steps;
@@ -64,6 +74,18 @@ struct DecisionMaker {
     decision.evidence.steps = facts.steps;
     decision.evidence.ranTableau = facts.ranTableau;
     decision.evidence.pivots = facts.pivots;
+    decision.evidence.digest = fnv1a64(receiptText(system, decision));
+  }
+
+  static void seal(Decision &decision, const System &system,
+                   const detail::SearchFacts &facts) {
+    decision.evidence.steps = facts.steps;
+    decision.evidence.pivots = facts.pivots;
+    decision.evidence.nodes = facts.nodes;
+    decision.evidence.ranLattice = facts.ranSearch;
+    decision.evidence.ranNormalize = facts.ranSearch;
+    decision.evidence.ranTableau = facts.ranTableau;
+    decision.evidence.ranSearch = facts.ranSearch;
     decision.evidence.digest = fnv1a64(receiptText(system, decision));
   }
 
@@ -88,6 +110,10 @@ Decision certifyInfeasible(const System &system, Domain domain,
   return DecisionMaker::infeasible(system, domain, std::move(proof));
 }
 
+Decision certifyInfeasible(const System &system, BranchProof proof) {
+  return DecisionMaker::infeasible(system, std::move(proof));
+}
+
 Decision detail::gateWitness(const System &system, RationalWitness witness,
                              const TableauFacts &facts) {
   Decision decision = DecisionMaker::feasible(system, std::move(witness));
@@ -106,6 +132,27 @@ Decision detail::gateProof(const System &system, InfeasibilityProof proof,
 Decision detail::gateUnknown(const System &system, UnknownReason reason,
                              const TableauFacts &facts) {
   Decision decision = DecisionMaker::unknown(Domain::Rational, reason);
+  DecisionMaker::seal(decision, system, facts);
+  return decision;
+}
+
+Decision detail::gateIntegerWitness(const System &system, IntegerWitness witness,
+                                    const SearchFacts &facts) {
+  Decision decision = DecisionMaker::feasible(system, std::move(witness));
+  DecisionMaker::seal(decision, system, facts);
+  return decision;
+}
+
+Decision detail::gateBranchProof(const System &system, BranchProof proof,
+                                 const SearchFacts &facts) {
+  Decision decision = DecisionMaker::infeasible(system, std::move(proof));
+  DecisionMaker::seal(decision, system, facts);
+  return decision;
+}
+
+Decision detail::gateIntegerUnknown(const System &system, UnknownReason reason,
+                                    const SearchFacts &facts) {
+  Decision decision = DecisionMaker::unknown(Domain::Integer, reason);
   DecisionMaker::seal(decision, system, facts);
   return decision;
 }
@@ -142,12 +189,18 @@ std::string receiptText(const System &system, const Decision &decision) {
   note(receipt.ranLattice, "lattice");
   note(receipt.ranNormalize, "normalize");
   note(receipt.ranTableau, "tableau");
+  note(receipt.ranSearch, "search");
   note(receipt.ranChecker, "checker");
   text += stages;
   text += '\n';
   if (receipt.ranTableau) {
     text += "pivots=";
     text += std::to_string(receipt.pivots);
+    text += '\n';
+  }
+  if (receipt.ranSearch) {
+    text += "nodes=";
+    text += std::to_string(receipt.nodes);
     text += '\n';
   }
   return text;
@@ -167,6 +220,8 @@ std::string canonicalText(const Decision &decision) {
     for (const Rational &value : point->values)
       text += value.toString() + "\n";
   if (const InfeasibilityProof *proof = decision.proof())
+    text += canonicalText(*proof);
+  if (const BranchProof *proof = decision.branchProof())
     text += canonicalText(*proof);
   return text;
 }

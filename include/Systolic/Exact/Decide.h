@@ -3,10 +3,9 @@
 // decide() asks whether a System has a point in a Domain. It answers only what
 // equality elimination and row normalization settle. Anything that survives
 // them is Unknown with reason RequiresSearch, which says nothing about
-// feasibility. The rational search is Session.h, which is opt-in and which
-// decide() does not call. The integer search is planned and does not exist yet.
-// decide() does not read strict rows, so a system with one is Unknown with
-// reason UnsupportedConstruct.
+// feasibility. The rational and integer searches are in Session.h. They are
+// opt-in, and decide() does not call them. decide() does not read strict rows,
+// so a system with one is Unknown with reason UnsupportedConstruct.
 //
 // Contract:
 //   Feasible    the Decision holds a witness in the domain, accepted by the
@@ -59,6 +58,10 @@ struct ExecutionReceipt {
   bool ranTableau = false;
   /// Pivots of that tableau in this query.
   std::uint64_t pivots = 0;
+  /// Whether this query ran the integer search in Session.h.
+  bool ranSearch = false;
+  /// Nodes of that search in this query.
+  std::uint64_t nodes = 0;
 };
 
 class [[nodiscard]] Decision {
@@ -81,9 +84,13 @@ public:
   const RationalWitness *rationalWitness() const {
     return rationalPoint ? &*rationalPoint : nullptr;
   }
-  /// Set exactly when provedInfeasible().
+  /// Set when provedInfeasible() by a derivation.
   const InfeasibilityProof *proof() const {
     return emptyProof ? &*emptyProof : nullptr;
+  }
+  /// Set when provedInfeasible() by cases. Exactly one of the two is set then.
+  const BranchProof *branchProof() const {
+    return branchTree ? &*branchTree : nullptr;
   }
 
   const ExecutionReceipt &receipt() const { return evidence; }
@@ -101,6 +108,7 @@ private:
   std::optional<IntegerWitness> integerPoint;
   std::optional<RationalWitness> rationalPoint;
   std::optional<InfeasibilityProof> emptyProof;
+  std::optional<BranchProof> branchTree;
   ExecutionReceipt evidence;
 };
 
@@ -116,12 +124,14 @@ Decision certifyFeasible(const System &system, IntegerWitness witness);
 Decision certifyFeasible(const System &system, RationalWitness witness);
 Decision certifyInfeasible(const System &system, Domain domain,
                            InfeasibilityProof proof);
+Decision certifyInfeasible(const System &system, BranchProof proof);
 
 /// The text whose FNV-1a 64 is ExecutionReceipt::digest. Exact format:
 ///   canonicalText(system), then the lines
 ///   domain=<name> verdict=<name> reason=<name> steps=<n>
-///   stages=<lattice,normalize,tableau,checker, or the subset that ran>
-/// and, when the tableau ran, the line pivots=<n>.
+///   stages=<lattice,normalize,tableau,search,checker, or the subset that ran>
+/// and, when the tableau ran, the line pivots=<n>, and when the search ran, the
+/// line nodes=<n>.
 std::string receiptText(const System &system, const Decision &decision);
 
 /// A text form of the answer: verdict, domain, reason, and the witness or proof.

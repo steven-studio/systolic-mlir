@@ -25,6 +25,8 @@ std::atomic<std::uint64_t> checkerRuns{0};
 std::atomic<std::uint64_t> checkerRefusals{0};
 std::atomic<std::uint64_t> rationalChecks{0};
 std::atomic<std::uint64_t> tableauPivots{0};
+std::atomic<std::uint64_t> integerChecks{0};
+std::atomic<std::uint64_t> branchNodes{0};
 } // namespace
 
 void detail::noteExecution(detail::Stage stage) {
@@ -50,6 +52,12 @@ void detail::noteExecution(detail::Stage stage) {
   case detail::Stage::Pivot:
     tableauPivots.fetch_add(1);
     break;
+  case detail::Stage::IntegerCheck:
+    integerChecks.fetch_add(1);
+    break;
+  case detail::Stage::BranchNode:
+    branchNodes.fetch_add(1);
+    break;
   }
 }
 
@@ -58,6 +66,7 @@ const BuildDeclaration &buildDeclaration() {
       SolverImplementation::ProjectOwned,
       SolverImplementation::LlvmUpstream,
       "S2",
+      "S3",
       SYSTOLIC_EXACT_SOURCE_SHA256,
       "ARITHMETIC_ONLY",
       SYSTOLIC_EXACT_PROJECT_COMMIT,
@@ -90,6 +99,8 @@ RuntimeEvidence runtimeEvidence() {
   evidence.checkerRefusals = checkerRefusals.load();
   evidence.rationalChecks = rationalChecks.load();
   evidence.tableauPivots = tableauPivots.load();
+  evidence.integerChecks = integerChecks.load();
+  evidence.branchNodes = branchNodes.load();
   return evidence;
 }
 
@@ -151,6 +162,7 @@ std::string provenanceJson() {
   json += "    \"solver\": {\"implementation\": " +
           quoted(implementationName(d.implementation)) +
           ", \"revision\": " + quoted(d.solverRevision) +
+          ", \"integer_revision\": " + quoted(d.integerRevision) +
           ", \"source_sha256\": " + quoted(d.solverSourceSha256) +
           ", \"llvm_dependency\": " + quoted(d.llvmDependency) + "},\n";
   json += "    \"production\": {\"solver\": " +
@@ -178,6 +190,8 @@ std::string provenanceJson() {
           ", \"checker_refusals\": " + std::to_string(e.checkerRefusals) +
           ", \"rational_checks\": " + std::to_string(e.rationalChecks) +
           ", \"tableau_pivots\": " + std::to_string(e.tableauPivots) +
+          ", \"integer_checks\": " + std::to_string(e.integerChecks) +
+          ", \"branch_nodes\": " + std::to_string(e.branchNodes) +
           "}\n";
   json += "}\n";
   return json;

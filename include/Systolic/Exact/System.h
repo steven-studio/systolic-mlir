@@ -77,6 +77,8 @@ enum class RowError {
   WrongCoefficientCount,
   /// A congruence needs a modulus of at least 1.
   NonPositiveModulus,
+  /// A Session could not take the row without passing its memory limit.
+  SessionLimit,
 };
 
 class System {

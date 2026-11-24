@@ -22,11 +22,21 @@
 //             (a / g) . x + floor(c / g) >= 0. Valid over the integers only:
 //             a / g . x is an integer, so it may round. This is the step of
 //             Gomory (1958) and Chvatal (1973). It takes closed rows only.
+//   Harden    a . x + c > 0 becomes a . x + c - 1 >= 0. Valid over the integers
+//             only: an integer above 0 is at least 1.
 //
 // Combine alone is the Farkas lemma, and it is what a conflict of the rational
 // solver in Session.h is written in.
-// Branching for the integer search is a planned extra rule and does not exist
-// yet; a checker that met one would have to refuse it.
+//
+// A branch proof shows that a system has no integer point by cases. A node is
+// either a leaf, which is a derivation of a false row, or a split on an integer
+// form f and an integer b. Every integer point has f <= b or f >= b + 1, so a
+// split proves emptiness once each of its two cases does. Within a case, the row
+// that the case assumes is available to the derivations below it, as an Input
+// of kind Assumption whose index is its depth: the split at the root gives
+// assumption 0, a split below it assumption 1, and so on. The columns of a form
+// are the system's variables, followed by one quotient per congruence. These
+// are integers on every integer point, which is what makes the split exhaustive.
 //
 //===----------------------------------------------------------------------===//
 
@@ -49,11 +59,18 @@ struct RationalWitness {
 
 /// A row of the system, by kind and index in that kind's list.
 struct RowRef {
-  enum class Kind { Inequality, Equality, Congruence, StrictInequality };
+  enum class Kind {
+    Inequality,
+    Equality,
+    Congruence,
+    StrictInequality,
+    /// The row assumed by a split on the path to this leaf, by depth.
+    Assumption,
+  };
   Kind kind = Kind::Inequality;
   std::size_t index = 0;
-  /// Use the row with its sign flipped. Refused for an inequality or a strict
-  /// inequality, whose negation does not follow from it.
+  /// Use the row with its sign flipped. Refused for an inequality, a strict
+  /// inequality or an assumption, whose negation does not follow from it.
   bool negated = false;
 };
 
@@ -63,24 +80,44 @@ struct ProofTerm {
 };
 
 struct ProofStep {
-  enum class Rule { Input, Combine, Tighten };
+  enum class Rule { Input, Combine, Tighten, Harden };
 
   static ProofStep input(RowRef row);
   static ProofStep combine(std::vector<ProofTerm> terms);
   static ProofStep tighten(std::size_t source);
+  static ProofStep harden(std::size_t source);
 
   Rule rule = Rule::Input;
   RowRef row;                   // Input
   std::vector<ProofTerm> terms; // Combine
-  std::size_t source = 0;       // Tighten
+  std::size_t source = 0;       // Tighten, Harden
 };
 
 struct InfeasibilityProof {
   std::vector<ProofStep> steps;
 };
 
+/// One node of a branch proof.
+struct BranchNode {
+  enum class Kind { Leaf, Split };
+  Kind kind = Kind::Leaf;
+  InfeasibilityProof leaf; // Leaf
+  /// Split: the form f, with one coefficient per variable and quotient.
+  std::vector<Int> form;
+  /// Split: the case of `low` assumes f <= bound, and `high` f >= bound + 1.
+  Int bound{0};
+  std::size_t low = 0;  // Split: index of a node
+  std::size_t high = 0; // Split: index of a node
+};
+
+/// Node 0 is the root. Every node is reached exactly once from it.
+struct BranchProof {
+  std::vector<BranchNode> nodes;
+};
+
 /// A text form that identifies the proof. Equal proofs give equal text.
 std::string canonicalText(const InfeasibilityProof &proof);
+std::string canonicalText(const BranchProof &proof);
 
 } // namespace systolic::exact
 

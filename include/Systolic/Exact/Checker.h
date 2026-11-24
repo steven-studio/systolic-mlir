@@ -9,6 +9,10 @@
 // A check takes a System by reference for the length of the call and keeps
 // nothing. It has no limits, because its work is linear in the certificate.
 //
+// A branch proof is walked with a stack of its own, so a deep proof cannot
+// overflow the call stack, and every node has to be reached exactly once, so a
+// proof cannot reuse a case or loop back on itself.
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef SYSTOLIC_EXACT_CHECKER_H
@@ -37,6 +41,10 @@ CheckResult checkWitness(const System &system, const RationalWitness &witness);
 /// domain Tighten and congruences are refused.
 CheckResult checkInfeasibility(const System &system, Domain domain,
                                const InfeasibilityProof &proof);
+
+/// The cases of the proof cover every integer point, and each leaf derives a
+/// false row by those rules, from the system and the rows its path assumes.
+CheckResult checkBranchProof(const System &system, const BranchProof &proof);
 
 } // namespace systolic::exact
 

@@ -36,6 +36,13 @@ struct WorkLimits {
   /// What a Session may hold across all its open scopes, from Session::
   /// heldCells(). The default is about 2 GB.
   std::uint64_t maxSessionCells = std::uint64_t(1) << 26;
+  /// Nodes of an integer search, leaves included.
+  std::uint64_t maxBranchNodes = std::uint64_t(1) << 16;
+  /// What an integer search may keep at once, for its rows, its open cases and
+  /// its proof, in units of about 32 bytes, with a long number counted by its
+  /// digits. The default is about 500 MB. The working rows of one node and the
+  /// tableau of one relaxation come on top, under maxTableauCells.
+  std::uint64_t maxSearchCells = std::uint64_t(1) << 24;
 };
 
 /// A cooperative request to stop, polled once per charge to a WorkMeter. A
