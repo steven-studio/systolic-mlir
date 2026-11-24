@@ -678,9 +678,11 @@ exactIterationSet(ArrayRef<affine::AffineForOp> loops);
 
 /// Integer-exact a ⊆ b for two conjunctive integer sets of one space (no
 /// symbols), without the Presburger library's set difference -- unsound in
-/// the LLVM 24 build of this project when the sets carry two or more locals
-/// pinned by equalities, the stepped loops' quotients
-/// (docs/AFFINE_GEMM_MAPPING.md section 19.14). b's locals are removed
+/// the LLVM 24 build of this project as soon as the subtrahend has one local
+/// whose bounds are strictly tighter than its floor-division bounds, which
+/// the stepped loops' equality-pinned quotients can become
+/// (llvm/llvm-project#233073, fixed by PR #234622;
+/// docs/AFFINE_GEMM_MAPPING.md section 19.14). b's locals are removed
 /// exactly: a local that an equality pins (c q + L = 0, no other remaining
 /// local in L or |c| = 1) is eliminated -- q = -L / c, an integer iff |c|
 /// divides L,

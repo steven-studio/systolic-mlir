@@ -2170,10 +2170,20 @@ this section's results.
 ### 19.14 Exact set inclusion without the library's set difference (2026-10-22)
 
 In the LLVM 24 build of this project (commit 7615da1), `PresburgerSet::subtract`, and with it
-`isSubsetOf` and `isEqual`, answer wrongly when the sets carry two or more locals pinned by
-equalities -- the quotients of stepped loops: for B = [0, 7] x [0, 14] and
+`isSubsetOf` and `isEqual`, answer wrongly as soon as the subtrahend has one local whose bounds
+are strictly tighter than its floor-division bounds (upstream llvm/llvm-project#233073, fixed by
+PR #234622): `getDivRepr` still recognizes it as a division (q = x floordiv 3 from
+3 q <= x <= 3 q), `getSetDifference` copies the tighter bounds into the minuend as the division's
+definition, and the points they exclude are lost from the difference. One such local is enough:
+[0, 8] is reported a subset of {x : 3 q <= x <= 3 q} and of {x : 3 q <= x <= 3 q + 1}.
+Equality-pinned locals -- the quotients of stepped loops -- reach this path when
+`computeReprWithOnlyDivLocals` turns them into tight inequality pairs; in this project that was
+seen with two or more of them (a single x = 3 q alone is answered right): for
+B = [0, 7] x [0, 14] and
 Y = {(y0, y1) : y1 = 3 q1 in [0, 13], b = 4 q2 in [0, 7], b <= y0 <= b + 3}, `B.isSubsetOf(Y)`
-is true although (0, 1) is in B and not in Y (one stepped dimension: right). Conjunctive
+is true although (0, 1) is in B and not in Y (one stepped dimension: right). With the PR applied
+all of these are answered right, and the library is wrong on 0 of the 3000 random pairs of
+`exact_set_inclusion.mlir` (32 before). Conjunctive
 emptiness and lexmin (`isIntegerEmpty`, `findIntegerLexMin`) are not affected. Four decisions
 used the difference: the exact parallelotope of 19.13 (`candidate.isEqual(target)`), the
 disproof of central symmetry (`mirror.isEqual(set)`, a subtract for the witness), the bijection

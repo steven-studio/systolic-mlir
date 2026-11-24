@@ -4,8 +4,12 @@
 // docs/AFFINE_GEMM_MAPPING.md section 19.14: exactIsSubset decides a ⊆ b for
 // conjunctive integer sets with emptiness tests only (no set difference). In
 // the LLVM 24 build of this project PresburgerSet::subtract / isSubsetOf /
-// isEqual answer wrongly with two or more equality-pinned locals; the first
-// case below is that counterexample: B = [0, 7] x [0, 14] is NOT a subset of
+// isEqual answer wrongly as soon as the subtrahend has one local whose bounds
+// are strictly tighter than its floor-division bounds
+// (llvm/llvm-project#233073, fixed by PR #234622); the stepped loops'
+// equality-pinned quotients become such locals, here with two of them (one
+// alone is answered right). The first case below is that counterexample:
+// B = [0, 7] x [0, 14] is NOT a subset of
 // Y = {(y0, y1) : y1 = 3 q1 in [0, 13], b = 4 q2 in [0, 7], b <= y0 <= b + 3}
 // ((0, 1) is in B, not in Y), which the library reports as a subset. Every
 // exact answer is checked against the points of a box holding both sets

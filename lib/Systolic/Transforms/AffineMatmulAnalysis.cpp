@@ -5112,10 +5112,12 @@ findExactParallelotope(ArrayRef<affine::AffineForOp> band) {
   }
   // Each level's choice above is confirmed by the Presburger library's
   // equality, which is not trusted with the decision: in the LLVM 24 build
-  // its set difference is unsound with two or more equality-pinned locals --
-  // the stepped loops' quotients (docs section 19.14). The whole band is
-  // decided here, exactly, both inclusions: undecided or unequal, the band
-  // is not normalized.
+  // its set difference is unsound as soon as the subtrahend has one local
+  // whose bounds are tighter than its floor-division bounds, which the
+  // stepped loops' equality-pinned quotients can become
+  // (llvm/llvm-project#233073, PR #234622; docs section 19.14). The whole
+  // band is decided here, exactly, both inclusions: undecided or unequal,
+  // the band is not normalized.
   std::optional<bool> same = exactIsEqual(prefix, domain);
   if (!same || !*same)
     return std::nullopt;
